@@ -223,6 +223,10 @@ func (s *Store) LoadConfig() (*config.Config, error) {
 			cfg.UpstreamTimeout = n
 		}
 	}
+	if v := settings["request_log"]; v == "0" {
+		f := false
+		cfg.RequestLog = &f
+	}
 	if v := settings["health_interval"]; v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.HealthInterval = n

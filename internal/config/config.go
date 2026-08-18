@@ -39,6 +39,7 @@ type Config struct {
 	HealthPath     string       `yaml:"health_path"`     // 默认健康检查路径
 	Strategy       string       `yaml:"strategy"`        // 默认负载均衡策略：least-conn（最少连接）/ weighted（加权随机，默认）
 	UpstreamTimeout int         `yaml:"upstream_timeout"` // 上游转发超时（秒），默认 10；超时计入熔断失败
+	RequestLog     *bool        `yaml:"request_log"`     // 是否记录最近请求（面板「请求日志」）；nil 视为 true（默认开）
 	AdminPath      string       `yaml:"admin_path"`      // 状态面板路径，默认 /admin
 	AdminToken     string       `yaml:"admin_token"`     // 状态面板访问 token（可选，空则不鉴权）
 	Sites          []SiteConfig `yaml:"sites"`           // 站点列表（按域名路由）
@@ -75,6 +76,10 @@ func Normalize(cfg *Config) {
 	}
 	if cfg.AdminPath == "" {
 		cfg.AdminPath = "/admin"
+	}
+	if cfg.RequestLog == nil {
+		v := true
+		cfg.RequestLog = &v
 	}
 	for i := range cfg.Sites {
 		site := &cfg.Sites[i]

@@ -57,6 +57,7 @@ type Balancer struct {
 
 	unmatched http.Handler // 未匹配域名时的处理器（管理面板），需自行鉴权
 	timeout   time.Duration // 单次转发超时；超时计入上游熔断失败
+	requestLog bool        // 是否记录最近请求（关闭后 logRequest 零开销）
 
 	logMu  sync.Mutex
 	reqLog []ReqEntry
@@ -65,14 +66,15 @@ type Balancer struct {
 
 // NewBalancer 构造分流器，按域名建立路由表。
 // unmatched 处理未匹配域名的请求（管理面板入口），其内部负责 token 鉴权与渲染；
-// timeout 为单次转发超时（超时 → 502 + 上游熔断计数）。
-func NewBalancer(sites []*Site, unmatched http.Handler, timeout time.Duration) *Balancer {
+// timeout 为单次转发超时（超时 → 502 + 上游熔断计数）；requestLog 控制是否记录最近请求
+func NewBalancer(sites []*Site, unmatched http.Handler, timeout time.Duration, requestLog bool) *Balancer {
 	b := &Balancer{
-		sites:     sites,
-		byHost:    make(map[string]*Site, len(sites)),
-		unmatched: unmatched,
-		timeout:   timeout,
-		maxLog:    200,
+		sites:      sites,
+		byHost:     make(map[string]*Site, len(sites)),
+		unmatched:  unmatched,
+		timeout:    timeout,
+		requestLog: requestLog,
+		maxLog:     200,
 	}
 	for _, s := range sites {
 		b.byHost[strings.ToLower(s.Domain)] = s
@@ -176,8 +178,11 @@ func (w *noCacheWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return nil, nil, fmt.Errorf("hijack not supported")
 }
 
-// logRequest 记录最近一条转发记录（环形缓冲）
+// logRequest 记录最近一条转发记录（环形缓冲）；requestLog 关闭时零开销
 func (b *Balancer) logRequest(r *http.Request, siteName, upstream string) {
+	if !b.requestLog {
+		return
+	}
 	b.logMu.Lock()
 	defer b.logMu.Unlock()
 	entry := ReqEntry{

@@ -264,6 +264,7 @@ input:focus,select:focus{outline:2px solid var(--primary-soft);border-color:var(
               <div><label>健康检查路径</label><input id="set-hp" size="12" value="/api/health"></div>
               <div><label>默认均衡策略</label><select id="set-strategy"><option value="least-conn">least-conn</option><option value="weighted">weighted</option></select></div>
               <div><label>上游转发超时（秒，超时自动熔断切换）</label><input id="set-ut" size="6" type="number" value="10"></div>
+              <div><label class="lbl-switch"><span class="switch"><input type="checkbox" id="set-rl" checked><span class="sl"></span></span><span>记录请求日志</span></label></div>
               <button class="btn btn-p" onclick="saveSettings()">保存全局设置</button>
             </div></div>
             <div id="msg-settings"></div>
@@ -511,6 +512,7 @@ function loadSettings(){
     if(m['health_path'])document.getElementById('set-hp').value=m['health_path'];
     if(m['strategy'])document.getElementById('set-strategy').value=m['strategy'];
     if(m['upstream_timeout'])document.getElementById('set-ut').value=m['upstream_timeout'];
+    document.getElementById('set-rl').checked=m['request_log']!=='0';
   });
 }
 function saveSettings(){
@@ -521,6 +523,7 @@ function saveSettings(){
   body['health_path']=document.getElementById('set-hp').value;
   body['strategy']=document.getElementById('set-strategy').value;
   body['upstream_timeout']=document.getElementById('set-ut').value;
+  body['request_log']=document.getElementById('set-rl').checked?'1':'0';
   api('/admin/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(){
     document.getElementById('msg-settings').className='msg';document.getElementById('msg-settings').textContent='全局设置已保存并生效';
   }).catch(function(e){document.getElementById('msg-settings').className='err';document.getElementById('msg-settings').textContent='保存失败: '+e});
