@@ -65,26 +65,25 @@ jobs:
     steps:
       - name: Deploy to server
         uses: appleboy/ssh-action@v1
-        env:
-          # config.yaml 内容以 GitHub Secret 形式注入，运行时写入服务器，绝不打包进镜像
-          CONFIG_YAML: ${{ secrets.CONFIG_YAML }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           password: ${{ secrets.DEPLOY_PASSWORD }}
-          envs: CONFIG_YAML
           script: |
+            set -e
             IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]'):latest"
             CONTAINER="${{ github.event.repository.name }}"
-            CONFIG_DIR="/opt/edge-balancer"
+            CONFIG_FILE="/opt/edge-balancer/config.yaml"
 
-            # 写入最新配置（运行时从 secret 读取）
-            mkdir -p "$CONFIG_DIR"
-            printf '%s\n' "$CONFIG_YAML" > "$CONFIG_DIR/config.yaml"
+            # 配置文件由服务器本地维护（1Panel 文件管理或 SSH 提前放好）：
+            # CI 只负责部署，配置不经过 GitHub Secrets、也不进镜像。
+            if [ ! -f "$CONFIG_FILE" ]; then
+              echo "ERROR: $CONFIG_FILE 不存在，请先在服务器上创建配置文件" >&2
+              exit 1
+            fi
 
             sudo docker pull "$IMAGE"
-            sudo docker stop "$CONTAINER" || true
-            sudo docker rm "$CONTAINER" || true
+            sudo docker rm -f "$CONTAINER" || true
 
             sudo docker run -d \
               --name "$CONTAINER" \
@@ -94,7 +93,7 @@ jobs:
               --cpus=0.5 \
               --log-opt max-size=10m \
               --log-opt max-file=3 \
-              -v "$CONFIG_DIR/config.yaml:/app/config.yaml:ro" \
+              -v "$CONFIG_FILE:/app/config.yaml:ro" \
               -p 6705:8080 \
               "$IMAGE"
 
