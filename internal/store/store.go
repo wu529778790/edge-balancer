@@ -306,6 +306,16 @@ func (s *Store) UpdateSite(id int64, domain, strategy, healthPath string, enable
 	return err
 }
 
+// UpdateSiteEnabled 仅切换站点启用状态（不触碰其它字段，供开关使用）
+func (s *Store) UpdateSiteEnabled(id int64, enabled bool) error {
+	e := 0
+	if enabled {
+		e = 1
+	}
+	_, err := s.db.Exec(`UPDATE sites SET enabled=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?`, e, id)
+	return err
+}
+
 // DeleteSite 删除站点（上游级联删除）
 func (s *Store) DeleteSite(id int64) error {
 	_, err := s.db.Exec(`DELETE FROM sites WHERE id=?`, id)
@@ -330,6 +340,16 @@ func (s *Store) UpdateUpstream(id int64, name, url, host string, weight, priorit
 	}
 	_, err := s.db.Exec(`UPDATE upstreams SET name=?, url=?, host=?, weight=?, priority=?, health=?, cf_account=?, enabled=? WHERE id=?`,
 		name, url, host, weight, priority, health, cfAccount, e, id)
+	return err
+}
+
+// UpdateUpstreamEnabled 仅切换上游启用状态（不触碰其它字段，供开关使用）
+func (s *Store) UpdateUpstreamEnabled(id int64, enabled bool) error {
+	e := 0
+	if enabled {
+		e = 1
+	}
+	_, err := s.db.Exec(`UPDATE upstreams SET enabled=? WHERE id=?`, e, id)
 	return err
 }
 

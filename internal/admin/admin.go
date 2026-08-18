@@ -210,15 +210,22 @@ func (h *Handler) handleSiteAPI(w http.ResponseWriter, r *http.Request, seg []st
 				http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
 				return
 			}
-			// domain 允许为空：toggleSite 只传 enabled 时不传 domain；
-			// openSiteModal 编辑时前端保证 domain 非空
 			enabled := true
 			if in.Enabled != nil {
 				enabled = *in.Enabled
 			}
-			if err := h.store.UpdateSite(id, in.Domain, in.Strategy, in.HealthPath, enabled); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
+			// 纯开关切换（只传 enabled，其它字段都空）：只更新 enabled 列，
+			// 避免用空值覆盖 domain/strategy 等字段
+			if in.Domain == "" && in.Strategy == "" && in.HealthPath == "" {
+				if err := h.store.UpdateSiteEnabled(id, enabled); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+			} else {
+				if err := h.store.UpdateSite(id, in.Domain, in.Strategy, in.HealthPath, enabled); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
 			}
 			if err := h.reload(); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -304,23 +311,35 @@ func (h *Handler) handleUpstreamAPI(w http.ResponseWriter, r *http.Request, seg 
 				http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
 				return
 			}
-			// 字段编辑要求 name 和 url 同时提供；toggleUp 只传 enabled 时两者都空，放行；
-			// 只传一个则视为非法部分编辑，400 拒绝
-			if (in.Name != "" || in.URL != "") && (in.Name == "" || in.URL == "") {
-				http.Error(w, "name 和 url 必须同时提供", http.StatusBadRequest)
-				return
-			}
 			enabled := true
 			if in.Enabled != nil {
 				enabled = *in.Enabled
 			}
-			if err := h.store.UpdateUpstream(id, in.Name, in.URL, in.Host, in.Weight, in.Priority, in.Health, in.CFAccount, enabled); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			// 手动启用时清除该上游的配额自动停用标记
-			if enabled {
-				h.store.ClearAutoOff(in.CFAccount, id)
+			// 纯开关切换（只传 enabled，其它字段都空）：只更新 enabled 列，
+			// 避免用空值覆盖 name/url/host 等字段
+			if in.Name == "" && in.URL == "" && in.Host == "" && in.Weight == 0 && in.Priority == 0 && in.Health == "" && in.CFAccount == "" {
+				if err := h.store.UpdateUpstreamEnabled(id, enabled); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				// 手动启用时清除该上游的配额自动停用标记
+				if enabled {
+					h.store.ClearAutoOff("", id)
+				}
+			} else {
+				// 字段编辑要求 name 和 url 同时提供；只传一个则视为非法部分编辑
+				if in.Name == "" || in.URL == "" {
+					http.Error(w, "name 和 url 必须同时提供", http.StatusBadRequest)
+					return
+				}
+				if err := h.store.UpdateUpstream(id, in.Name, in.URL, in.Host, in.Weight, in.Priority, in.Health, in.CFAccount, enabled); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				// 手动启用时清除该上游的配额自动停用标记
+				if enabled {
+					h.store.ClearAutoOff(in.CFAccount, id)
+				}
 			}
 			if err := h.reload(); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
