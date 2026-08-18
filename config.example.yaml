@@ -6,12 +6,24 @@ health_interval: 10           # 健康检查间隔（秒）
 health_timeout: 5             # 健康检查超时（秒）
 health_path: "/api/health"    # 默认健康检查路径
 
-# 上游列表：按 weight 加权分流，挂了自动剔除，恢复自动加入
+# 负载均衡策略（同一优先级组内）：
+#   least-conn  最少连接（推荐：动态均衡，避免某台上游被压垮）
+#   weighted    加权随机（默认）
+strategy: "least-conn"
+
+# 上游列表
+# priority：优先级，越小越优先；高优先级健康则独享流量，挂了才轮到下一级（逐级兜底）
+#           不填 priority（默认 0）时，所有上游同优先级，按 strategy 分流
+# weight：仅 strategy = weighted 时生效，同一优先级组内的分流比例
 upstreams:
-  - name: "cf-worker-a"       # 唯一名称
-    url: "https://xxx.workers.dev"
-    weight: 50                # 权重 50
   - name: "vercel"
     url: "https://your-app.vercel.app"
-    weight: 50                # 权重 50，与上面 50:50 分流
-    # health: "/api/health"   # 可选：覆盖全局 health_path
+    priority: 1              # 最高优先级，健康时独享全部流量
+
+  - name: "cf-worker"
+    url: "https://xxx.workers.dev"
+    priority: 2              # vercel 挂了才轮到它
+
+  - name: "self-server"
+    url: "http://127.0.0.1:3000"
+    priority: 3              # 最后兜底：自己的服务器

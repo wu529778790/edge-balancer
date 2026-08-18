@@ -9,10 +9,11 @@ import (
 
 // UpstreamConfig 单个上游的静态配置
 type UpstreamConfig struct {
-	Name   string `yaml:"name"`   // 上游名称（唯一标识）
-	URL    string `yaml:"url"`    // 上游地址，如 https://xxx.workers.dev
-	Weight int    `yaml:"weight"` // 分流权重（灰度比例）
-	Health string `yaml:"health"` // 可选：该上游的健康检查路径，覆盖全局 health_path
+	Name     string `yaml:"name"`     // 上游名称（唯一标识）
+	URL      string `yaml:"url"`      // 上游地址，如 https://xxx.workers.dev
+	Weight   int    `yaml:"weight"`   // 分流权重（灰度比例）
+	Priority int    `yaml:"priority"` // 优先级，越小越优先；0 表示默认同一优先级（纯权重分流）
+	Health   string `yaml:"health"`   // 可选：该上游的健康检查路径，覆盖全局 health_path
 }
 
 // Config 全局配置
@@ -21,6 +22,7 @@ type Config struct {
 	HealthInterval int              `yaml:"health_interval"` // 健康检查间隔（秒），默认 10
 	HealthTimeout  int              `yaml:"health_timeout"`  // 健康检查超时（秒），默认 5
 	HealthPath     string           `yaml:"health_path"`     // 默认健康检查路径
+	Strategy       string           `yaml:"strategy"`        // 负载均衡策略：least-conn（最少连接）/ weighted（加权随机，默认）
 	Upstreams      []UpstreamConfig `yaml:"upstreams"`       // 上游列表
 }
 
@@ -48,6 +50,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.HealthPath == "" {
 		cfg.HealthPath = "/api/health"
+	}
+	if cfg.Strategy == "" {
+		cfg.Strategy = "weighted"
 	}
 
 	// 校验上游

@@ -24,10 +24,11 @@ func main() {
 	upstreams := make([]*Upstream, 0, len(cfg.Upstreams))
 	for _, uc := range cfg.Upstreams {
 		upstreams = append(upstreams, &Upstream{
-			Name:   uc.Name,
-			URL:    uc.URL,
-			Weight: uc.Weight,
-			Health: uc.Health,
+			Name:     uc.Name,
+			URL:      uc.URL,
+			Weight:   uc.Weight,
+			Priority: uc.Priority,
+			Health:   uc.Health,
 		})
 	}
 
@@ -43,7 +44,7 @@ func main() {
 	checker.Start(ctx)
 
 	// 分流器
-	balancer := NewBalancer(upstreams)
+	balancer := NewBalancer(upstreams, cfg.Strategy)
 
 	server := &http.Server{
 		Addr:    cfg.Listen,

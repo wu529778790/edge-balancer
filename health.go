@@ -9,18 +9,29 @@ import (
 	"time"
 )
 
-// Upstream 运行时的上游，携带健康状态
+// Upstream 运行时的上游，携带健康状态和在途请求数
 type Upstream struct {
-	Name   string
-	URL    string
-	Weight int
-	Health string // 健康检查路径（空则用全局默认）
+	Name     string
+	URL      string
+	Weight   int
+	Priority int
+	Health   string // 健康检查路径（空则用全局默认）
 
-	healthy atomic.Bool
+	healthy  atomic.Bool
+	inFlight atomic.Int64
 }
 
 // IsHealthy 是否健康
 func (u *Upstream) IsHealthy() bool { return u.healthy.Load() }
+
+// InFlight 当前在途请求数（用于 least-conn 策略）
+func (u *Upstream) InFlight() int64 { return u.inFlight.Load() }
+
+// Enter 请求进入（在途 +1）
+func (u *Upstream) Enter() { u.inFlight.Add(1) }
+
+// Leave 请求完成（在途 -1）
+func (u *Upstream) Leave() { u.inFlight.Add(-1) }
 
 // HealthChecker 定时探测上游健康状态
 type HealthChecker struct {
@@ -47,9 +58,8 @@ func (h *HealthChecker) Start(ctx context.Context) {
 }
 
 func (h *HealthChecker) loop(ctx context.Context) {
-	// 启动后立即探测一轮，避免「先打满流量再发现挂了」
-	h.checkAll()
-
+	// 初始乐观认为健康，第一个 interval 后才做首次探测，
+	// 避免「edge-balancer 与上游同时启动、上游尚未就绪」时被误判为不健康
 	ticker := time.NewTicker(h.interval)
 	defer ticker.Stop()
 	for {
