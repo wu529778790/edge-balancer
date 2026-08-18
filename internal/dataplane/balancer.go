@@ -123,12 +123,38 @@ func (b *Balancer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 单次转发超时：超时返回 502 并计入上游熔断失败，后续请求自动切到其它上游
 	ctx, cancel := context.WithTimeout(r.Context(), b.timeout)
 	defer cancel()
-	proxy.ServeHTTP(nc, r.WithContext(ctx))
+	sw := &statusWriter{ResponseWriter: nc}
+	proxy.ServeHTTP(sw, r.WithContext(ctx))
+	// 响应 >=500（含上游 5xx 与转发层 502）视为访问失败，计入熔断
+	if sw.status >= 500 {
+		up.Fail()
+	}
 }
 
 // noCacheWriter 强制响应带 no-store，阻止 nginx/CF 等中间层缓存动态内容
 type noCacheWriter struct {
 	http.ResponseWriter
+}
+
+// statusWriter 记录首次响应状态码，用于按响应判定上游是否"访问成功"
+// （>=500 视为失败计入熔断：覆盖上游返回 5xx 与转发层错误两种形态）
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	if w.status == 0 {
+		w.status = code
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(b)
 }
 
 func (w *noCacheWriter) WriteHeader(code int) {

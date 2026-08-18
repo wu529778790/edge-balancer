@@ -66,14 +66,12 @@ func NewSite(cfg config.SiteConfig, defaultStrategy, defaultHealthPath string, o
 		if target, err := url.Parse(uc.URL); err == nil {
 			proxy := httputil.NewSingleHostReverseProxy(target)
 			// 客户端主动取消（context canceled）是正常现象（刷新/切换/超时等），
-			// 静默处理避免刷日志；但无论哪种错误都计入熔断失败——
-			// 客户端取消往往意味着上游响应太慢，正是需要熔断的信号
+			// 静默不记日志；所有错误统一写 502，由外层按响应状态码计入熔断失败
+			// （不能在此直接 u.Fail()：上游返回 502 响应时不走 ErrorHandler，需统一在响应层判定）
 			proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-				u.Fail()
-				if errors.Is(err, context.Canceled) {
-					return
+				if !errors.Is(err, context.Canceled) {
+					log.Printf("转发 %s/%s 失败: %v", s.Domain, u.Name, err)
 				}
-				log.Printf("转发 %s/%s 失败: %v", s.Domain, u.Name, err)
 				http.Error(w, "bad gateway", http.StatusBadGateway)
 			}
 			if uc.Host != "" {
