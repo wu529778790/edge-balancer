@@ -20,7 +20,8 @@ type CFUsage struct {
 	Error     string  `json:"error,omitempty"`
 }
 
-// QueryCFUsage 查询单个账号当月 Workers 请求数（GraphQL Analytics API）
+// QueryCFUsage 查询单个账号当天 Workers 请求数（GraphQL Analytics API）
+// 免费版限额 100,000 请求/天（非每月）；查 date_geq/date_leq = 今天
 // 注意：字段名为 workersInvocationsAdaptive（无 Groups 后缀，文档有误）
 func QueryCFUsage(acc CFAccount) (CFUsage, error) {
 	quota := acc.Quota
@@ -33,12 +34,11 @@ func QueryCFUsage(acc CFAccount) (CFUsage, error) {
 	}
 
 	now := time.Now()
-	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
-	date := monthStart.Format("2006-01-02")
+	today := now.Format("2006-01-02")
 
 	query := fmt.Sprintf(
-		`query { viewer { accounts(filter: {accountTag: "%s"}) { workersInvocationsAdaptive(limit: 1, filter: {date_geq: "%s"}) { sum { requests } } } } }`,
-		acc.AccountID, date)
+		`query { viewer { accounts(filter: {accountTag: "%s"}) { workersInvocationsAdaptive(limit: 1, filter: {date_geq: "%s", date_leq: "%s"}) { sum { requests } } } } }`,
+		acc.AccountID, today, today)
 
 	payload, _ := json.Marshal(map[string]string{"query": query})
 	req, err := http.NewRequest(http.MethodPost, "https://api.cloudflare.com/client/v4/graphql", bytes.NewReader(payload))
