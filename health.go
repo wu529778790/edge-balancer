@@ -17,10 +17,13 @@ type Upstream struct {
 	Weight   int
 	Priority int
 	Health   string // 健康检查路径（空则用全局默认）
+	Site     string // 所属站点域名
 
 	healthy       atomic.Bool
 	inFlight      atomic.Int64
 	totalRequests atomic.Int64
+
+	healthPath string // 最终健康检查路径（上游 > 站点 > 全局）
 }
 
 // IsHealthy 是否健康
@@ -97,7 +100,7 @@ func (h *HealthChecker) checkAll() {
 
 // checkOne 探测单个上游，2xx/3xx 视为健康
 func (h *HealthChecker) checkOne(u *Upstream) {
-	path := u.Health
+	path := u.healthPath
 	if path == "" {
 		path = h.defaultPath
 	}
@@ -113,7 +116,7 @@ func (h *HealthChecker) checkOne(u *Upstream) {
 		healthy = resp.StatusCode >= 200 && resp.StatusCode < 400
 	}
 	if u.healthy.Load() != healthy {
-		log.Printf("上游 %-16s 健康状态变化: %v (%s)", u.Name, healthy, target)
+		log.Printf("上游 %s/%s 健康状态变化: %v (%s)", u.Site, u.Name, healthy, target)
 	}
 	u.healthy.Store(healthy)
 }

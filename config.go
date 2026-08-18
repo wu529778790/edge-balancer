@@ -9,23 +9,31 @@ import (
 
 // UpstreamConfig 单个上游的静态配置
 type UpstreamConfig struct {
-	Name     string `yaml:"name"`     // 上游名称（唯一标识）
+	Name     string `yaml:"name"`     // 上游名称（站点内唯一标识）
 	URL      string `yaml:"url"`      // 上游地址，如 https://xxx.workers.dev
 	Weight   int    `yaml:"weight"`   // 分流权重（灰度比例）
 	Priority int    `yaml:"priority"` // 优先级，越小越优先；0 表示默认同一优先级（纯权重分流）
 	Health   string `yaml:"health"`   // 可选：该上游的健康检查路径，覆盖全局 health_path
 }
 
+// SiteConfig 单个站点（域名）的配置：按 Host 头路由，每个域名独立一套上游
+type SiteConfig struct {
+	Domain     string           `yaml:"domain"`      // 站点域名，如 panhub.shenzjd.com（匹配 Host 头）
+	Strategy   string           `yaml:"strategy"`    // 该站点分流策略（空则用全局 strategy）
+	HealthPath string           `yaml:"health_path"` // 该站点健康检查路径（空则用全局 health_path）
+	Upstreams  []UpstreamConfig `yaml:"upstreams"`   // 该站点的上游列表
+}
+
 // Config 全局配置
 type Config struct {
-	Listen         string           `yaml:"listen"`          // 监听地址，默认 :8080
-	HealthInterval int              `yaml:"health_interval"` // 健康检查间隔（秒），默认 10
-	HealthTimeout  int              `yaml:"health_timeout"`  // 健康检查超时（秒），默认 5
-	HealthPath     string           `yaml:"health_path"`     // 默认健康检查路径
-	Strategy       string           `yaml:"strategy"`        // 负载均衡策略：least-conn（最少连接）/ weighted（加权随机，默认）
-	AdminPath      string           `yaml:"admin_path"`      // 状态面板路径，默认 /admin
-	AdminToken     string           `yaml:"admin_token"`     // 状态面板访问 token（可选，空则不鉴权）
-	Upstreams      []UpstreamConfig `yaml:"upstreams"`       // 上游列表
+	Listen         string       `yaml:"listen"`          // 监听地址，默认 :8080
+	HealthInterval int          `yaml:"health_interval"` // 健康检查间隔（秒），默认 10
+	HealthTimeout  int          `yaml:"health_timeout"`  // 健康检查超时（秒），默认 5
+	HealthPath     string       `yaml:"health_path"`     // 默认健康检查路径
+	Strategy       string       `yaml:"strategy"`        // 默认负载均衡策略：least-conn（最少连接）/ weighted（加权随机，默认）
+	AdminPath      string       `yaml:"admin_path"`      // 状态面板路径，默认 /admin
+	AdminToken     string       `yaml:"admin_token"`     // 状态面板访问 token（可选，空则不鉴权）
+	Sites          []SiteConfig `yaml:"sites"`           // 站点列表（按域名路由）
 }
 
 // LoadConfig 加载并校验配置文件
@@ -60,19 +68,33 @@ func LoadConfig(path string) (*Config, error) {
 		cfg.AdminPath = "/admin"
 	}
 
-	// 校验上游
-	if len(cfg.Upstreams) == 0 {
-		return nil, fmt.Errorf("至少配置一个 upstream")
+	// 校验站点
+	if len(cfg.Sites) == 0 {
+		return nil, fmt.Errorf("至少配置一个 site（域名）")
 	}
-	total := 0
-	for i := range cfg.Upstreams {
-		if cfg.Upstreams[i].Weight <= 0 {
-			cfg.Upstreams[i].Weight = 1
+	seen := make(map[string]bool)
+	for i := range cfg.Sites {
+		site := &cfg.Sites[i]
+		if site.Domain == "" {
+			return nil, fmt.Errorf("site[%d] 缺少 domain", i)
 		}
-		total += cfg.Upstreams[i].Weight
-	}
-	if total <= 0 {
-		return nil, fmt.Errorf("上游总权重必须大于 0")
+		if seen[site.Domain] {
+			return nil, fmt.Errorf("site 域名重复: %s", site.Domain)
+		}
+		seen[site.Domain] = true
+
+		if len(site.Upstreams) == 0 {
+			return nil, fmt.Errorf("site %s 至少配置一个 upstream", site.Domain)
+		}
+		for j := range site.Upstreams {
+			up := &site.Upstreams[j]
+			if up.Weight <= 0 {
+				up.Weight = 1
+			}
+			if up.Name == "" {
+				return nil, fmt.Errorf("site %s 的 upstream[%d] 缺少 name", site.Domain, j)
+			}
+		}
 	}
 	return &cfg, nil
 }

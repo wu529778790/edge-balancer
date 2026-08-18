@@ -1,33 +1,40 @@
-# edge-balancer 配置示例
+# edge-balancer 配置示例（多站点版）
 # 复制本文件为 config.yaml（已 gitignore），填入你的真实上游地址
+#
+# 架构：edge-balancer 是中心网关，按 Host 头（域名）路由。
+# - 未匹配到任何 site 的域名 → 直接显示管理面板（管理入口）
+# - 匹配到 site 的域名 → 按该 site 的上游配置分流
+# 各业务域名的 1Panel/nginx 反代目标需指向 edge-balancer 的监听端口。
 
 listen: ":8080"               # 监听地址
 health_interval: 10           # 健康检查间隔（秒）
 health_timeout: 5             # 健康检查超时（秒）
 health_path: "/api/health"    # 默认健康检查路径
 
-# 状态面板（v2）：访问 <listen>/admin 查看上游健康与流量分配
-# admin_path: "/admin"         # 面板路径，默认 /admin
-# admin_token: "your-token"    # 可选：访问面板需要的 token（留空则不鉴权，公网部署强烈建议配置）
+# 状态面板（v2）
+admin_path: "/admin"          # 面板路径，默认 /admin
+admin_token: "your-token"     # 可选：访问面板需要的 token（留空则不鉴权，公网部署强烈建议配置）
 
-# 负载均衡策略（同一优先级组内）：
+# 默认负载均衡策略（site 未单独指定时生效）：
 #   least-conn  最少连接（推荐：动态均衡，避免某台上游被压垮）
 #   weighted    加权随机（默认）
 strategy: "least-conn"
 
-# 上游列表
-# priority：优先级，越小越优先；高优先级健康则独享流量，挂了才轮到下一级（逐级兜底）
-#           不填 priority（默认 0）时，所有上游同优先级，按 strategy 分流
-# weight：仅 strategy = weighted 时生效，同一优先级组内的分流比例
-upstreams:
-  - name: "vercel"
-    url: "https://your-app.vercel.app"
-    priority: 1              # 最高优先级，健康时独享全部流量
+# 站点列表：每个域名一组上游配置
+sites:
+  - domain: "panhub.shenzjd.com"   # 业务域名（匹配 Host 头）
+    strategy: "least-conn"          # 可选：覆盖全局 strategy
+    health_path: "/api/health"      # 可选：覆盖全局 health_path
+    upstreams:
+      - name: "cf-worker"
+        url: "https://xxx.workers.dev"
+        priority: 1                 # 优先级：越小越优先，挂了才轮到下一级
+      - name: "docker"
+        url: "http://127.0.0.1:5253"
+        priority: 2                 # 兜底：内网源站直连
 
-  - name: "cf-worker"
-    url: "https://xxx.workers.dev"
-    priority: 2              # vercel 挂了才轮到它
-
-  - name: "self-server"
-    url: "http://127.0.0.1:3000"
-    priority: 3              # 最后兜底：自己的服务器
+  - domain: "api.shenzjd.com"      # 另一个域名，独立一组上游
+    upstreams:
+      - name: "main"
+        url: "http://127.0.0.1:8081"
+        priority: 1
