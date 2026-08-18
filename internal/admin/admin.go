@@ -158,6 +158,7 @@ func (h *Handler) handleSiteAPI(w http.ResponseWriter, r *http.Request, seg []st
 			Domain     string `json:"domain"`
 			Strategy   string `json:"strategy"`
 			HealthPath string `json:"health_path"`
+			Enabled    *bool  `json:"enabled"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
@@ -167,7 +168,11 @@ func (h *Handler) handleSiteAPI(w http.ResponseWriter, r *http.Request, seg []st
 			http.Error(w, "domain 不能为空", http.StatusBadRequest)
 			return
 		}
-		id, err := h.store.CreateSite(in.Domain, in.Strategy, in.HealthPath)
+		enabled := true
+		if in.Enabled != nil {
+			enabled = *in.Enabled
+		}
+		id, err := h.store.CreateSite(in.Domain, in.Strategy, in.HealthPath, enabled)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -251,6 +256,7 @@ func (h *Handler) handleSiteAPI(w http.ResponseWriter, r *http.Request, seg []st
 			Priority  int    `json:"priority"`
 			Health    string `json:"health"`
 			CFAccount string `json:"cf_account"`
+			Enabled   *bool  `json:"enabled"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
@@ -260,7 +266,11 @@ func (h *Handler) handleSiteAPI(w http.ResponseWriter, r *http.Request, seg []st
 			http.Error(w, "name 和 url 不能为空", http.StatusBadRequest)
 			return
 		}
-		upID, err := h.store.CreateUpstream(id, in.Name, in.URL, in.Host, in.Weight, in.Priority, in.Health, in.CFAccount)
+		enabled := true
+		if in.Enabled != nil {
+			enabled = *in.Enabled
+		}
+		upID, err := h.store.CreateUpstream(id, in.Name, in.URL, in.Host, in.Weight, in.Priority, in.Health, in.CFAccount, enabled)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

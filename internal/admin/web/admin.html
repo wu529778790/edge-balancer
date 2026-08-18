@@ -461,9 +461,9 @@ function openSiteModal(id){
   ],site,function(){
     var domain=mval('domain');
     if(!domain){alert('域名不能为空');return}
-    var body={domain:domain,strategy:mval('strategy'),health_path:mval('health_path')};
+    var body={domain:domain,strategy:mval('strategy'),health_path:mval('health_path'),enabled:mval('enabled')?true:false};
     var path='/admin/api/sites',method='POST';
-    if(site){body.enabled=mval('enabled')?true:false;path+='/'+site.id;method='PUT'}
+    if(site){path+='/'+site.id;method='PUT'}
     api(path,{method:method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(){
       closeModal();loadConfig();
     }).catch(function(e){alert('保存失败: '+e)});
@@ -488,10 +488,10 @@ function openUpModal(sid,uid){
     {key:'cf_account',label:'CF 账号（配额监控）',type:'select',options:cfOpts},
     {key:'enabled',label:'启用',type:'check'}
   ],up,function(){
-    var body={name:mval('name'),url:mval('url'),host:mval('host'),weight:+mval('weight')||1,priority:+mval('priority')||0,health:mval('health'),cf_account:mval('cf_account')};
+    var body={name:mval('name'),url:mval('url'),host:mval('host'),weight:+mval('weight')||1,priority:+mval('priority')||0,health:mval('health'),cf_account:mval('cf_account'),enabled:mval('enabled')?true:false};
     if(!body.name||!body.url){alert('名称和 URL 不能为空');return}
     var path='/admin/api/sites/'+sid+'/upstreams',method='POST';
-    if(up){body.enabled=mval('enabled')?true:false;path='/admin/api/upstreams/'+up.id;method='PUT'}
+    if(up){path='/admin/api/upstreams/'+up.id;method='PUT'}
     api(path,{method:method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(){
       closeModal();loadConfig();
     }).catch(function(e){alert('保存失败: '+e)});

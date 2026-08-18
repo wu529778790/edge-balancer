@@ -287,8 +287,12 @@ func (s *Store) SetSetting(key, value string) error {
 }
 
 // CreateSite 新建站点
-func (s *Store) CreateSite(domain, strategy, healthPath string) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO sites(domain, strategy, health_path) VALUES(?, ?, ?)`, domain, strategy, healthPath)
+func (s *Store) CreateSite(domain, strategy, healthPath string, enabled bool) (int64, error) {
+	e := 0
+	if enabled {
+		e = 1
+	}
+	res, err := s.db.Exec(`INSERT INTO sites(domain, strategy, health_path, enabled) VALUES(?, ?, ?, ?)`, domain, strategy, healthPath, e)
 	if err != nil {
 		return 0, err
 	}
@@ -323,9 +327,13 @@ func (s *Store) DeleteSite(id int64) error {
 }
 
 // CreateUpstream 添加上游
-func (s *Store) CreateUpstream(siteID int64, name, url, host string, weight, priority int, health, cfAccount string) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO upstreams(site_id, name, url, host, weight, priority, health, cf_account) VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
-		siteID, name, url, host, weight, priority, health, cfAccount)
+func (s *Store) CreateUpstream(siteID int64, name, url, host string, weight, priority int, health, cfAccount string, enabled bool) (int64, error) {
+	e := 0
+	if enabled {
+		e = 1
+	}
+	res, err := s.db.Exec(`INSERT INTO upstreams(site_id, name, url, host, weight, priority, health, cf_account, enabled) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		siteID, name, url, host, weight, priority, health, cfAccount, e)
 	if err != nil {
 		return 0, err
 	}
