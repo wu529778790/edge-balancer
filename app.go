@@ -61,7 +61,7 @@ func (a *App) reload() error {
 		upstreams = append(upstreams, site.Upstreams...)
 	}
 
-	b := NewBalancer(sites, cfg.AdminPath, cfg.AdminToken)
+	b := NewBalancer(sites, cfg.AdminToken)
 	a.balancer.Store(b)
 
 	// 重建健康检查
@@ -116,7 +116,7 @@ func (a *App) serveAdmin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(adminHTML))
+	w.Write(adminHTML)
 }
 
 // serveConfigAPI 配置管理 REST API（需数据库模式）

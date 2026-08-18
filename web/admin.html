@@ -117,6 +117,18 @@ input:focus,select:focus{outline:2px solid var(--primary-soft);border-color:var(
 .empty{color:var(--text-4);font-size:12.5px;padding:14px 0;text-align:center}
 /* ---------- 面板切换 ---------- */
 .panel{display:none}.panel.on{display:flex;flex-direction:column;gap:20px}
+/* ---------- Modal ---------- */
+.modal-mask{position:fixed;inset:0;background:rgba(15,17,26,.45);display:flex;align-items:center;justify-content:center;z-index:100}
+.modal{background:#fff;border-radius:16px;width:480px;max-width:94vw;box-shadow:0 20px 50px rgba(0,0,0,.18);display:flex;flex-direction:column;max-height:86vh}
+.modal-head{display:flex;align-items:center;gap:10px;padding:16px 20px 12px;border-bottom:1px solid var(--border)}
+.modal-head h3{font-size:15px;font-weight:600;flex:1}
+.modal-x{border:none;background:none;font-size:20px;line-height:1;color:var(--text-3);cursor:pointer;padding:4px}
+.modal-x:hover{color:var(--text)}
+.modal-body{padding:18px 20px;overflow-y:auto}
+.modal-foot{display:flex;justify-content:flex-end;gap:8px;padding:12px 20px;border-top:1px solid var(--border)}
+.m-field{margin-bottom:14px}
+.m-field label{display:block;font-size:12px;color:#57606A;margin-bottom:5px}
+.m-field input,.m-field select{width:100%;font-size:13px;padding:8px 10px}
 /* ---------- 响应式 ---------- */
 @media(max-width:1000px){.kpi-row{grid-template-columns:repeat(2,1fr)}.sidebar{width:72px}.logo-name,.logo-sub,.nav-item span,.nav-label,.nav-foot .u-name,.nav-foot .u-role{display:none}.nav-item{justify-content:center}.logo{justify-content:center;padding:20px 0}}
 @media(max-width:560px){.kpi-row{grid-template-columns:1fr}.content{padding:14px}.topbar{padding:0 14px}}
@@ -255,14 +267,12 @@ input:focus,select:focus{outline:2px solid var(--primary-soft);border-color:var(
         </div>
 
         <div class="card">
-          <div class="card-head"><h2>站点</h2><span class="hint">按 Host 头路由域名到上游组</span></div>
+          <div class="card-head">
+            <h2>站点</h2>
+            <span class="hint">按 Host 头路由域名到上游组</span>
+            <button class="btn btn-p btn-sm" onclick="openSiteModal()">新增站点</button>
+          </div>
           <div class="card-body">
-            <div class="frm"><div class="row">
-              <div><label>域名（匹配 Host 头）</label><input id="ns-domain" size="26" placeholder="example.shenzjd.com"></div>
-              <div><label>策略（留空用默认）</label><select id="ns-strategy"><option value="">默认</option><option value="least-conn">least-conn</option><option value="weighted">weighted</option></select></div>
-              <div><label>health_path（可选）</label><input id="ns-hp" size="12" placeholder="/api/health"></div>
-              <button class="btn btn-p" onclick="createSite()">添加站点</button>
-            </div></div>
             <div id="sites-cfg"></div>
             <div id="msg-sites"></div>
           </div>
@@ -272,25 +282,33 @@ input:focus,select:focus{outline:2px solid var(--primary-soft);border-color:var(
       <!-- Cloudflare 配额 -->
       <div class="panel" id="panel-cf">
         <div class="card">
-          <div class="card-head"><h2>Cloudflare 配额（多账号）</h2><span class="hint">免费版 10 万请求/天，超阈值自动切换兜底上游</span></div>
+          <div class="card-head">
+            <h2>Cloudflare 配额（多账号）</h2>
+            <span class="hint">免费版 10 万请求/天，超阈值自动切换兜底上游</span>
+            <button class="btn btn-sm" onclick="openCFModal()">新增账号</button>
+            <button class="btn btn-sm" onclick="checkCF()">立即检查配额并切换</button>
+          </div>
           <div class="card-body">
             <div id="cf-list"></div>
-            <div class="frm"><div class="row">
-              <div><label>账号名</label><input id="cf-name" size="10" placeholder="账号A"></div>
-              <div><label>API Token（只读）</label><input id="cf-token" size="30" placeholder="CF API Token"></div>
-              <div><label>Account ID</label><input id="cf-accid" size="20" placeholder="CF Account ID"></div>
-              <div><label>免费额度</label><input id="cf-quota" size="8" type="number" value="100000"></div>
-              <div><label>阈值%</label><input id="cf-th" size="5" type="number" value="90"></div>
-              <button class="btn" onclick="addCFRow()">加入列表</button>
-            </div></div>
-            <div class="row" style="margin-top:10px">
-              <button class="btn btn-p" onclick="saveCF()">保存账号</button>
-              <button class="btn" onclick="checkCF()">立即检查配额并切换</button>
-            </div>
             <div id="msg-cf"></div>
           </div>
         </div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- 通用 Modal -->
+<div class="modal-mask" id="modal-mask" style="display:none">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="modal-title">标题</h3>
+      <button class="modal-x" onclick="closeModal()">×</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn btn-p" onclick="submitModal()">保存</button>
     </div>
   </div>
 </div>
@@ -315,6 +333,46 @@ function showTab(n){
   if(n==='log'){loadStatus()}
 }
 
+/* ---------- 通用 Modal ---------- */
+var modalCtx=null;
+function openModal(title,fields,values,onSubmit){
+  modalCtx=onSubmit;
+  document.getElementById('modal-title').textContent=title;
+  var html='';
+  fields.forEach(function(f){
+    var v=values&&values[f.key]!=null?values[f.key]:'';
+    html+='<div class="m-field"><label>'+esc(f.label)+'</label>';
+    if(f.type==='select'){
+      html+='<select id="mf-'+f.key+'">';
+      (f.options||[]).forEach(function(o){
+        var ov=o,ol=o;
+        if(typeof o==='object'){ov=o.v;ol=o.l}
+        html+='<option value="'+esc(ov)+'"'+(String(v)===String(ov)?' selected':'')+'>'+esc(ol)+'</option>';
+      });
+      html+='</select>';
+    }else if(f.type==='number'){
+      html+='<input id="mf-'+f.key+'" type="number" value="'+esc(v)+'" placeholder="'+esc(f.placeholder||'')+'">';
+    }else if(f.type==='check'){
+      html+='<label class="lbl-switch"><span class="switch"><input type="checkbox" id="mf-'+f.key+'"'+(v?' checked':'')+'><span class="sl"></span></span><span>启用</span></label>';
+    }else{
+      html+='<input id="mf-'+f.key+'" value="'+esc(v)+'" placeholder="'+esc(f.placeholder||'')+'">';
+    }
+    html+='</div>';
+  });
+  document.getElementById('modal-body').innerHTML=html;
+  document.getElementById('modal-mask').style.display='flex';
+}
+function closeModal(){
+  document.getElementById('modal-mask').style.display='none';
+  modalCtx=null;
+}
+function submitModal(){if(modalCtx)modalCtx()}
+function mval(key){
+  var el=document.getElementById('mf-'+key);
+  if(!el)return '';
+  return el.type==='checkbox'?el.checked:el.value;
+}
+
 /* ---------- 总览 ---------- */
 function loadStatus(){
   api('/admin/api').then(function(d){
@@ -334,7 +392,6 @@ function loadStatus(){
     document.getElementById('meta').textContent='更新于 '+d.time+' · '+d.sites.length+' 个站点';
     var html='';
     d.sites.forEach(function(s){
-      var anyHealthy=false;
       html+='<div class="site-head"><div class="s-name">'+
         '<svg viewBox="0 0 15 15" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="7.5" cy="7.5" r="6" stroke="currentColor" stroke-width="1.3"/></svg>'+
         esc(s.domain)+' <span class="badge strategy">'+esc(s.strategy)+'</span></div>'+
@@ -344,7 +401,7 @@ function loadStatus(){
       s.upstreams.forEach(function(x){
         var st,cls;
         if(!x.enabled){st='已停用';cls='off'}
-        else if(x.healthy){st='健康';cls='ok';anyHealthy=true}
+        else if(x.healthy){st='健康';cls='ok'}
         else{st='不健康';cls='bad'}
         html+='<tr'+(x.enabled?'':' class="up-off"')+'><td>'+esc(x.name)+'</td><td class="code">'+esc(x.url)+'</td>'+
           '<td><span class="badge '+cls+'"><span class="dot"></span>'+st+'</span></td>'+
@@ -372,41 +429,67 @@ function loadConfig(){
     sites.forEach(function(s){
       html+='<div class="card" style="box-shadow:none;border:1px solid var(--border);margin-bottom:14px"><div class="site-head">'+
         '<div class="s-name">'+esc(s.domain)+' <span class="badge strategy">'+esc(s.strategy||'默认')+'</span></div>'+
-        '<div class="ops"><label class="lbl-switch"><span style="color:#57606A">启用</span><span class="switch"><input type="checkbox" '+(s.enabled?'checked':'')+' onchange="toggleSite('+s.id+',this.checked)"><span class="sl"></span></span></label>'+
-        '<button class="btn btn-d btn-sm" onclick="delSite('+s.id+')">删除</button></div></div>'+
+        '<div class="ops">'+
+        '<label class="lbl-switch"><span style="color:#57606A">启用</span><span class="switch"><input type="checkbox" '+(s.enabled?'checked':'')+' onchange="toggleSite('+s.id+',this.checked)"><span class="sl"></span></span></label>'+
+        '<button class="btn btn-sm" onclick="openSiteModal('+s.id+')">编辑</button>'+
+        '<button class="btn btn-d btn-sm" onclick="delSite('+s.id+')">删除</button>'+
+        '</div></div>'+
         '<div class="card-body" style="padding-top:4px">'+
-        '<table><thead><tr><th>上游</th><th>地址</th><th>host</th><th>权重</th><th>优先级</th><th>健康路径</th><th>启用</th><th></th></tr></thead><tbody>';
+        '<table><thead><tr><th>上游</th><th>地址</th><th>host</th><th>权重</th><th>优先级</th><th>健康路径</th><th>CF 账号</th><th>启用</th><th></th></tr></thead><tbody>';
       s.upstreams.forEach(function(u){
-        var statusLbl = u.enabled ? '已启用' : '已停用';
         html+='<tr'+(u.enabled?'':' class="up-off"')+'><td>'+esc(u.name)+'</td><td class="code">'+esc(u.url)+'</td><td class="code">'+esc(u.host||'-')+'</td>'+
-          '<td>'+u.weight+'</td><td>'+u.priority+'</td><td class="code">'+esc(u.health||'-')+'</td>'+
-          '<td><label class="lbl-switch"><span class="switch"><input type="checkbox" '+(u.enabled?'checked':'')+' onchange="toggleUp('+u.id+',this.checked)"><span class="sl"></span></span>'+statusLbl+'</label></td>'+
-          '<td><button class="btn btn-sm" onclick="editUpForm('+u.id+')">编辑</button> <button class="btn btn-d btn-sm" onclick="delUp('+u.id+')">删除</button></td></tr>';
-        html+='<tr class="hidden" id="upedit-'+u.id+'"><td colspan="8"><div class="frm"><div class="row">'+
-          '<div><label>name</label><input id="ue-'+u.id+'-name" value="'+esc(u.name)+'" size="8"></div>'+
-          '<div><label>url</label><input id="ue-'+u.id+'-url" value="'+esc(u.url)+'" size="26"></div>'+
-          '<div><label>host（CF Worker 填 workers.dev 域名）</label><input id="ue-'+u.id+'-host" value="'+esc(u.host||'')+'" size="18" placeholder="CF Worker 域名"></div>'+
-          '<div><label>weight</label><input id="ue-'+u.id+'-weight" type="number" value="'+u.weight+'" size="4"></div>'+
-          '<div><label>priority</label><input id="ue-'+u.id+'-priority" type="number" value="'+u.priority+'" size="4"></div>'+
-          '<div><label>health</label><input id="ue-'+u.id+'-health" value="'+esc(u.health||'')+'" size="8" placeholder="可选"></div>'+
-          '<div><label>CF账号</label><input id="ue-'+u.id+'-cf" value="'+esc(u.cf_account||'')+'" size="8" placeholder="配额账号名"></div>'+
-          '<button class="btn btn-p btn-sm" onclick="saveUp('+u.id+')">保存</button> <button class="btn btn-sm" onclick="editUpForm('+u.id+')">取消</button>'+
-          '</div></div></td></tr>';
+          '<td>'+u.weight+'</td><td>'+u.priority+'</td><td class="code">'+esc(u.health||'-')+'</td><td class="code">'+esc(u.cf_account||'-')+'</td>'+
+          '<td><label class="lbl-switch"><span class="switch"><input type="checkbox" '+(u.enabled?'checked':'')+' onchange="toggleUp('+u.id+',this.checked)"><span class="sl"></span></span></label></td>'+
+          '<td><button class="btn btn-sm" onclick="openUpModal('+s.id+','+u.id+')">编辑</button> <button class="btn btn-d btn-sm" onclick="delUp('+u.id+')">删除</button></td></tr>';
       });
       html+='</tbody></table>'+
-        '<div class="frm"><div class="row">'+
-        '<div><label>新增上游 name</label><input id="nu-'+s.id+'-name" size="8" placeholder="cf-worker"></div>'+
-        '<div><label>url</label><input id="nu-'+s.id+'-url" size="26" placeholder="https://xxx.workers.dev/"></div>'+
-        '<div><label>host</label><input id="nu-'+s.id+'-host" size="18" placeholder="CF Worker 填域名，本地源站留空"></div>'+
-        '<div><label>weight</label><input id="nu-'+s.id+'-weight" type="number" value="1" size="4"></div>'+
-        '<div><label>priority</label><input id="nu-'+s.id+'-priority" type="number" value="1" size="4"></div>'+
-        '<div><label>CF账号</label><input id="nu-'+s.id+'-cf" size="8" placeholder="配额账号名"></div>'+
-        '<button class="btn btn-p btn-sm" onclick="addUp('+s.id+')">添加上游</button></div></div>'+
+        '<div class="row" style="margin-top:10px"><button class="btn btn-sm" onclick="openUpModal('+s.id+')">新增上游</button></div>'+
         '</div></div>';
     });
-    document.getElementById('sites-cfg').innerHTML=html||'<div class="empty">暂无站点，先在上方添加一个</div>';
+    document.getElementById('sites-cfg').innerHTML=html||'<div class="empty">暂无站点，点右上角「新增站点」</div>';
     if(sites.length)loadSettings();
   }).catch(function(e){document.getElementById('msg-sites').className='err';document.getElementById('msg-sites').textContent='加载配置失败: '+e});
+}
+
+function openSiteModal(id){
+  var site=id==null?null:gSites.find(function(x){return x.id===id});
+  openModal(site?'编辑站点':'新增站点',[
+    {key:'domain',label:'域名（匹配 Host 头）',placeholder:'example.shenzjd.com'},
+    {key:'strategy',label:'均衡策略',type:'select',options:[{v:'',l:'默认'},{v:'least-conn',l:'least-conn'},{v:'weighted',l:'weighted'}]},
+    {key:'health_path',label:'健康检查路径（可选）',placeholder:'/api/health'},
+    {key:'enabled',label:'启用',type:'check'}
+  ],site,function(){
+    var domain=mval('domain');
+    if(!domain){alert('域名不能为空');return}
+    var body={domain:domain,strategy:mval('strategy'),health_path:mval('health_path')};
+    var path='/admin/api/sites',method='POST';
+    if(site){body.enabled=mval('enabled')?true:false;path+='/'+site.id;method='PUT'}
+    api(path,{method:method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(){
+      closeModal();loadConfig();
+    }).catch(function(e){alert('保存失败: '+e)});
+  });
+}
+
+function openUpModal(sid,uid){
+  var up=uid==null?null:gSites.find(function(x){return x.id===sid}).upstreams.find(function(x){return x.id===uid});
+  openModal(up?'编辑上游':'新增上游',[
+    {key:'name',label:'名称',placeholder:'cf-worker'},
+    {key:'url',label:'URL',placeholder:'https://xxx.workers.dev/'},
+    {key:'host',label:'Host（CF Worker 填 workers.dev 域名）',placeholder:'本地源站留空'},
+    {key:'weight',label:'权重',type:'number'},
+    {key:'priority',label:'优先级',type:'number'},
+    {key:'health',label:'健康路径（可选）',placeholder:'/api/health'},
+    {key:'cf_account',label:'CF 账号（配额账号名）',placeholder:'可选'},
+    {key:'enabled',label:'启用',type:'check'}
+  ],up,function(){
+    var body={name:mval('name'),url:mval('url'),host:mval('host'),weight:+mval('weight')||1,priority:+mval('priority')||0,health:mval('health'),cf_account:mval('cf_account')};
+    if(!body.name||!body.url){alert('名称和 URL 不能为空');return}
+    var path='/admin/api/sites/'+sid+'/upstreams',method='POST';
+    if(up){body.enabled=mval('enabled')?true:false;path='/admin/api/upstreams/'+up.id;method='PUT'}
+    api(path,{method:method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(){
+      closeModal();loadConfig();
+    }).catch(function(e){alert('保存失败: '+e)});
+  });
 }
 
 function loadSettings(){
@@ -429,67 +512,53 @@ function saveSettings(){
     document.getElementById('msg-settings').className='msg';document.getElementById('msg-settings').textContent='全局设置已保存并生效';
   }).catch(function(e){document.getElementById('msg-settings').className='err';document.getElementById('msg-settings').textContent='保存失败: '+e});
 }
-function createSite(){
-  api('/admin/api/sites',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-    domain:document.getElementById('ns-domain').value,
-    strategy:document.getElementById('ns-strategy').value,
-    health_path:document.getElementById('ns-hp').value
-  })}).then(function(){document.getElementById('ns-domain').value='';loadConfig()});
-}
 function toggleSite(id,on){api('/admin/api/sites/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:on})}).then(loadConfig)}
 function toggleUp(id,on){api('/admin/api/upstreams/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:on})}).then(loadConfig)}
 function delSite(id){var s=gSites.find(function(x){return x.id===id});if(!s)return;if(!confirm('删除站点 '+s.domain+' 及其全部上游？'))return;api('/admin/api/sites/'+id,{method:'DELETE'}).then(loadConfig)}
-function addUp(sid){
-  api('/admin/api/sites/'+sid+'/upstreams',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-    name:document.getElementById('nu-'+sid+'-name').value,
-    url:document.getElementById('nu-'+sid+'-url').value,
-    host:document.getElementById('nu-'+sid+'-host').value,
-    weight:+document.getElementById('nu-'+sid+'-weight').value||1,
-    priority:+document.getElementById('nu-'+sid+'-priority').value||0,
-    cf_account:document.getElementById('nu-'+sid+'-cf').value
-  })}).then(loadConfig);
-}
-function editUpForm(id){toggle('upedit-'+id)}
-function saveUp(id){
-  api('/admin/api/upstreams/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-    name:document.getElementById('ue-'+id+'-name').value,
-    url:document.getElementById('ue-'+id+'-url').value,
-    host:document.getElementById('ue-'+id+'-host').value,
-    weight:+document.getElementById('ue-'+id+'-weight').value||1,
-    priority:+document.getElementById('ue-'+id+'-priority').value||0,
-    health:document.getElementById('ue-'+id+'-health').value,
-    cf_account:document.getElementById('ue-'+id+'-cf').value
-  })}).then(function(){toggle('upedit-'+id);loadConfig()});
-}
 function delUp(id){if(!confirm('删除该上游？'))return;api('/admin/api/upstreams/'+id,{method:'DELETE'}).then(loadConfig)}
-function toggle(id){document.getElementById(id).classList.toggle('hidden')}
 
 /* ---------- Cloudflare 配额 ---------- */
 var gCF=[];
-function addCFRow(){
-  gCF.push({
-    name:document.getElementById('cf-name').value,
-    token:document.getElementById('cf-token').value,
-    account_id:document.getElementById('cf-accid').value,
-    quota:+document.getElementById('cf-quota').value||100000,
-    threshold:+document.getElementById('cf-th').value||90
+function loadCF(){
+  api('/admin/api/cf').then(function(d){
+    gCF=d.accounts||[];
+    renderCF();
+    renderCFUsage(d.usages);
   });
-  document.getElementById('cf-name').value='';document.getElementById('cf-token').value='';document.getElementById('cf-accid').value='';
-  renderCF();
 }
-function delCFRow(i){gCF.splice(i,1);renderCF()}
 function renderCF(){
   var html='<table><thead><tr><th>账号</th><th>Account ID</th><th>额度</th><th>阈值%</th><th></th></tr></thead><tbody>';
   gCF.forEach(function(a,i){
     html+='<tr><td>'+esc(a.name)+'</td><td class="code">'+esc(a.account_id)+'</td><td>'+fmt(a.quota)+'</td><td>'+a.threshold+'</td>'+
-      '<td><button class="btn btn-d btn-sm" onclick="delCFRow('+i+')">移除</button></td></tr>';
+      '<td><button class="btn btn-sm" onclick="openCFModal('+i+')">编辑</button> <button class="btn btn-d btn-sm" onclick="delCFRow('+i+')">删除</button></td></tr>';
   });
   html+='</tbody></table>';
-  document.getElementById('cf-list').innerHTML=html||'<div class="empty">未配置账号</div>';
+  document.getElementById('cf-list').innerHTML=html||'<div class="empty">未配置账号，点「新增账号」</div>';
+}
+function openCFModal(i){
+  var acc=i==null?null:gCF[i];
+  openModal(acc?'编辑账号':'新增账号',[
+    {key:'name',label:'账号名',placeholder:'账号A'},
+    {key:'token',label:'API Token（只读）',placeholder:'CF API Token'},
+    {key:'account_id',label:'Account ID',placeholder:'CF Account ID'},
+    {key:'quota',label:'免费额度（请求数）',type:'number'},
+    {key:'threshold',label:'阈值 %',type:'number'}
+  ],acc,function(){
+    var a={name:mval('name'),token:mval('token'),account_id:mval('account_id'),quota:+mval('quota')||100000,threshold:+mval('threshold')||90};
+    if(!a.name){alert('账号名不能为空');return}
+    if(i==null)gCF.push(a);else gCF[i]=a;
+    saveCF();
+  });
+}
+function delCFRow(i){
+  if(!confirm('删除 CF 账号「'+gCF[i].name+'」？'))return;
+  gCF.splice(i,1);
+  saveCF();
 }
 function saveCF(){
   api('/admin/api/cf',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(gCF)}).then(function(){
     document.getElementById('msg-cf').className='msg';document.getElementById('msg-cf').textContent='账号已保存';
+    closeModal();
     loadCF();
   }).catch(function(e){document.getElementById('msg-cf').className='err';document.getElementById('msg-cf').textContent='保存失败: '+e});
 }
@@ -521,13 +590,6 @@ function renderCFUsage(usages){
   html+='</tbody></table>';
   var el=document.getElementById('cf-list');
   el.innerHTML=el.innerHTML+'<div style="margin-top:8px">'+html+'</div>';
-}
-function loadCF(){
-  api('/admin/api/cf').then(function(d){
-    gCF=d.accounts||[];
-    renderCF();
-    renderCFUsage(d.usages);
-  });
 }
 
 loadStatus();setInterval(loadStatus,3000);
