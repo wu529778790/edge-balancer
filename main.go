@@ -38,18 +38,24 @@ func main() {
 		log.Fatalf("初始化失败: %v", err)
 	}
 
-	// DB 模式：定时同步配置，页面改动自动生效（无需重启）
+	// DB 模式：定时同步配置 + 每小时检查 Cloudflare 配额（自动切换）
 	if store != nil {
 		go func() {
-			ticker := time.NewTicker(5 * time.Second)
-			defer ticker.Stop()
+			cfgTicker := time.NewTicker(5 * time.Second)
+			defer cfgTicker.Stop()
+			quotaTicker := time.NewTicker(1 * time.Hour)
+			defer quotaTicker.Stop()
 			for {
 				select {
 				case <-ctx.Done():
 					return
-				case <-ticker.C:
+				case <-cfgTicker.C:
 					if err := app.Reload(); err != nil {
 						log.Printf("配置重载失败: %v", err)
+					}
+				case <-quotaTicker.C:
+					if _, err := app.CheckCFQuotas(); err != nil {
+						log.Printf("配额检查失败: %v", err)
 					}
 				}
 			}

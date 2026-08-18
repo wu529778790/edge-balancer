@@ -46,6 +46,7 @@ func NewSite(cfg SiteConfig, defaultStrategy, defaultHealthPath string) *Site {
 			Priority:   uc.Priority,
 			Health:     uc.Health,
 			Site:       cfg.Domain,
+			CFAccount:  uc.CFAccount,
 			Enabled:    enabled,
 			healthPath: uc.Health,
 		}

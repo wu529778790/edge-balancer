@@ -12,13 +12,14 @@ import (
 
 // Upstream 运行时的上游，携带健康状态和在途请求数
 type Upstream struct {
-	Name     string
-	URL      string
-	Weight   int
-	Priority int
-	Health   string // 健康检查路径（空则用全局默认）
-	Site     string // 所属站点域名
-	Enabled  bool   // 是否参与分流（false 仅展示，不转发）
+	Name      string
+	URL       string
+	Weight    int
+	Priority  int
+	Health    string // 健康检查路径（空则用全局默认）
+	Site      string // 所属站点域名
+	CFAccount string // 关联的 Cloudflare 账号名（配额监控）
+	Enabled   bool   // 是否参与分流（false 仅展示，不转发）
 
 	healthy       atomic.Bool
 	inFlight      atomic.Int64

@@ -178,6 +178,12 @@ func (a *App) serveConfigAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Cloudflare 配额
+	if len(seg) >= 1 && seg[0] == "cf" {
+		a.handleCFAPI(w, r, seg)
+		return
+	}
+
 	http.Error(w, "not found", http.StatusNotFound)
 }
 
@@ -272,18 +278,19 @@ func (a *App) handleSiteAPI(w http.ResponseWriter, r *http.Request, seg []string
 			return
 		}
 		var in struct {
-			Name     string `json:"name"`
-			URL      string `json:"url"`
-			Host     string `json:"host"`
-			Weight   int    `json:"weight"`
-			Priority int    `json:"priority"`
-			Health   string `json:"health"`
+			Name      string `json:"name"`
+			URL       string `json:"url"`
+			Host      string `json:"host"`
+			Weight    int    `json:"weight"`
+			Priority  int    `json:"priority"`
+			Health    string `json:"health"`
+			CFAccount string `json:"cf_account"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		upID, err := a.store.CreateUpstream(id, in.Name, in.URL, in.Host, in.Weight, in.Priority, in.Health)
+		upID, err := a.store.CreateUpstream(id, in.Name, in.URL, in.Host, in.Weight, in.Priority, in.Health, in.CFAccount)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -321,13 +328,14 @@ func (a *App) handleUpstreamAPI(w http.ResponseWriter, r *http.Request, seg []st
 		}
 		if r.Method == http.MethodPut {
 			var in struct {
-				Name     string `json:"name"`
-				URL      string `json:"url"`
-				Host     string `json:"host"`
-				Weight   int    `json:"weight"`
-				Priority int    `json:"priority"`
-				Health   string `json:"health"`
-				Enabled  *bool  `json:"enabled"`
+				Name      string `json:"name"`
+				URL       string `json:"url"`
+				Host      string `json:"host"`
+				Weight    int    `json:"weight"`
+				Priority  int    `json:"priority"`
+				Health    string `json:"health"`
+				CFAccount string `json:"cf_account"`
+				Enabled   *bool  `json:"enabled"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 				http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
@@ -337,9 +345,13 @@ func (a *App) handleUpstreamAPI(w http.ResponseWriter, r *http.Request, seg []st
 			if in.Enabled != nil {
 				enabled = *in.Enabled
 			}
-			if err := a.store.UpdateUpstream(id, in.Name, in.URL, in.Host, in.Weight, in.Priority, in.Health, enabled); err != nil {
+			if err := a.store.UpdateUpstream(id, in.Name, in.URL, in.Host, in.Weight, in.Priority, in.Health, in.CFAccount, enabled); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
+			}
+			// 手动启用时清除该上游的配额自动停用标记
+			if enabled {
+				a.store.ClearAutoOff(in.CFAccount, id)
 			}
 			if err := a.reload(); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -350,6 +362,133 @@ func (a *App) handleUpstreamAPI(w http.ResponseWriter, r *http.Request, seg []st
 		}
 	}
 	http.Error(w, "not found", http.StatusNotFound)
+}
+
+// handleCFAPI Cloudflare 配额管理接口
+// GET  /admin/api/cf        → 账号列表 + 各账号用量（实时查询）
+// PUT  /admin/api/cf        → 保存账号列表
+// POST /admin/api/cf/check  → 手动触发配额检查（自动停用/恢复），返回用量与操作结果
+func (a *App) handleCFAPI(w http.ResponseWriter, r *http.Request, seg []string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+	// POST /cf/check
+	if len(seg) == 2 && seg[1] == "check" && r.Method == http.MethodPost {
+		result, err := a.CheckCFQuotas()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(result)
+		return
+	}
+
+	if len(seg) != 1 {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	if r.Method == http.MethodGet {
+		accounts, err := a.store.GetCFAccounts()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		autoOff, _ := a.store.GetAutoOff()
+		usages := QueryAllCFUsages(accounts)
+		for i := range usages {
+			usages[i].AutoOff = len(autoOff[usages[i].Name]) > 0
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"accounts": accounts,
+			"usages":   usages,
+		})
+		return
+	}
+
+	if r.Method == http.MethodPut {
+		var accounts []CFAccount
+		if err := json.NewDecoder(r.Body).Decode(&accounts); err != nil {
+			http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := a.store.SetCFAccounts(accounts); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		return
+	}
+
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+}
+
+// CheckCFQuotas 检查所有 Cloudflare 账号用量：
+//   - 超阈值 → 自动停用该账号关联的上游（记录 auto_off 标记）
+//   - 未超阈值 → 自动恢复此前被配额停用的上游（下月重置生效）
+func (a *App) CheckCFQuotas() (map[string]interface{}, error) {
+	result := map[string]interface{}{"changed": false}
+	if a.store == nil {
+		return result, nil
+	}
+	accounts, err := a.store.GetCFAccounts()
+	if err != nil {
+		return nil, err
+	}
+	if len(accounts) == 0 {
+		result["usages"] = []CFUsage{}
+		return result, nil
+	}
+
+	usages := QueryAllCFUsages(accounts)
+	autoOff, err := a.store.GetAutoOff()
+	if err != nil {
+		return nil, err
+	}
+
+	changed := false
+	var actions []string
+	for _, u := range usages {
+		if u.Error != "" {
+			continue
+		}
+		ups, err := a.store.ListUpstreamsByAccount(u.Name)
+		if err != nil {
+			continue
+		}
+		for _, up := range ups {
+			if u.OverLimit && up.Enabled {
+				// 超阈值：停用 + 标记
+				a.store.UpdateUpstream(up.ID, up.Name, up.URL, up.Host, up.Weight, up.Priority, up.Health, up.CFAccount, false)
+				a.store.AddAutoOff(u.Name, up.ID)
+				changed = true
+				actions = append(actions, fmt.Sprintf("账号 %s 使用率 %.1f%% → 自动停用上游 %s", u.Name, u.Percent, up.Name))
+			} else if !u.OverLimit && !up.Enabled && containsID(autoOff[u.Name], up.ID) {
+				// 配额恢复：重新启用（仅限自动停用标记内的）
+				a.store.UpdateUpstream(up.ID, up.Name, up.URL, up.Host, up.Weight, up.Priority, up.Health, up.CFAccount, true)
+				a.store.ClearAutoOff(u.Name, up.ID)
+				changed = true
+				actions = append(actions, fmt.Sprintf("账号 %s 使用率 %.1f%% 已恢复 → 重新启用上游 %s", u.Name, u.Percent, up.Name))
+			}
+		}
+	}
+	if changed {
+		if err := a.reload(); err != nil {
+			return nil, err
+		}
+	}
+	result["changed"] = changed
+	result["actions"] = actions
+	result["usages"] = usages
+	return result, nil
+}
+
+func containsID(list []int64, id int64) bool {
+	for _, v := range list {
+		if v == id {
+			return true
+		}
+	}
+	return false
 }
 
 var _ = fmt.Sprintf // keep fmt import if needed

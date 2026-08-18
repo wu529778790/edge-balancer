@@ -287,6 +287,23 @@ input,select{font-size:12px;padding:5px 8px;border:1px solid #d4d7dd;border-radi
     <div id="msg-settings"></div>
   </div>
 
+  <div class="card"><h2>Cloudflare 配额（多账号）</h2>
+    <div id="cf-list"></div>
+    <div class="frm"><div class="row" style="align-items:flex-end">
+      <div><label>账号名</label><input id="cf-name" size="10" placeholder="账号A"></div>
+      <div><label>API Token（只读）</label><input id="cf-token" size="34" placeholder="CF API Token"></div>
+      <div><label>Account ID</label><input id="cf-accid" size="24" placeholder="CF Account ID"></div>
+      <div><label>免费额度</label><input id="cf-quota" size="8" type="number" value="100000"></div>
+      <div><label>阈值%</label><input id="cf-th" size="5" type="number" value="90"></div>
+      <button class="btn" onclick="addCFRow()">加入列表</button>
+    </div></div>
+    <div class="row" style="margin-top:8px">
+      <button class="btn btn-p" onclick="saveCF()">保存账号</button>
+      <button class="btn" onclick="checkCF()">立即检查配额并切换</button>
+    </div>
+    <div id="msg-cf"></div>
+  </div>
+
   <div class="card"><h2>站点</h2>
     <div class="frm" id="frm-new-site">
       <div class="row" style="align-items:flex-end">
@@ -305,7 +322,7 @@ input,select{font-size:12px;padding:5px 8px;border:1px solid #d4d7dd;border-radi
 function qs(k){return new URLSearchParams(location.search).get(k)}
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
 function api(path,opts){var u=path;var t=qs('token');if(t)u+=(u.indexOf('?')<0?'?':'&')+'token='+encodeURIComponent(t);return fetch(u,opts).then(function(r){return r.json().catch(function(){return {}})})}
-function showTab(n){document.getElementById('tab-status').className='tab'+(n==='status'?' on':'');document.getElementById('tab-config').className='tab'+(n==='config'?' on':'');document.getElementById('panel-status').style.display=n==='status'?'block':'none';document.getElementById('panel-config').style.display=n==='config'?'block':'none';if(n==='config')loadConfig()}
+function showTab(n){document.getElementById('tab-status').className='tab'+(n==='status'?' on':'');document.getElementById('tab-config').className='tab'+(n==='config'?' on':'');document.getElementById('panel-status').style.display=n==='status'?'block':'none';document.getElementById('panel-config').style.display=n==='config'?'block':'none';if(n==='config'){loadConfig();loadCF()}}
 
 function loadStatus(){
   api('/admin/api').then(function(d){
@@ -353,6 +370,7 @@ function loadConfig(){
           '<div><label>weight</label><input id="ue-'+u.id+'-weight" type="number" value="'+u.weight+'" size="5"></div>'+
           '<div><label>priority</label><input id="ue-'+u.id+'-priority" type="number" value="'+u.priority+'" size="5"></div>'+
           '<div><label>health</label><input id="ue-'+u.id+'-health" value="'+esc(u.health||'')+'" size="10" placeholder="可选"></div>'+
+          '<div><label>CF账号</label><input id="ue-'+u.id+'-cf" value="'+esc(u.cf_account||'')+'" size="10" placeholder="配额账号名"></div>'+
           '<button class="btn btn-p" onclick="saveUp('+u.id+')">保存</button> '+
           '<button class="btn" onclick="editUpForm('+u.id+')">取消</button></div></div></td></tr>';
       });
@@ -363,6 +381,7 @@ function loadConfig(){
         '<div><label>host</label><input id="nu-'+s.id+'-host" size="22" placeholder="CF Worker 填域名，本地源站留空"></div>'+
         '<div><label>weight</label><input id="nu-'+s.id+'-weight" type="number" value="1" size="5"></div>'+
         '<div><label>priority</label><input id="nu-'+s.id+'-priority" type="number" value="1" size="5"></div>'+
+        '<div><label>CF账号</label><input id="nu-'+s.id+'-cf" size="10" placeholder="配额账号名"></div>'+
         '<button class="btn btn-p" onclick="addUp('+s.id+')">添加上游</button></div></div>'+
         '</div>';
     });
@@ -409,7 +428,8 @@ function addUp(sid){
     url:document.getElementById('nu-'+sid+'-url').value,
     host:document.getElementById('nu-'+sid+'-host').value,
     weight:+document.getElementById('nu-'+sid+'-weight').value||1,
-    priority:+document.getElementById('nu-'+sid+'-priority').value||0
+    priority:+document.getElementById('nu-'+sid+'-priority').value||0,
+    cf_account:document.getElementById('nu-'+sid+'-cf').value
   })}).then(loadConfig);
 }
 function editUpForm(id){toggle('upedit-'+id)}
@@ -420,11 +440,71 @@ function saveUp(id){
     host:document.getElementById('ue-'+id+'-host').value,
     weight:+document.getElementById('ue-'+id+'-weight').value||1,
     priority:+document.getElementById('ue-'+id+'-priority').value||0,
-    health:document.getElementById('ue-'+id+'-health').value
+    health:document.getElementById('ue-'+id+'-health').value,
+    cf_account:document.getElementById('ue-'+id+'-cf').value
   })}).then(function(){toggle('upedit-'+id);loadConfig()});
 }
 function delUp(id){if(!confirm('删除该上游？'))return;api('/admin/api/upstreams/'+id,{method:'DELETE'}).then(loadConfig)}
 function toggle(id){document.getElementById(id).classList.toggle('hidden')}
+
+var gCF=[];
+function addCFRow(){
+  gCF.push({
+    name:document.getElementById('cf-name').value,
+    token:document.getElementById('cf-token').value,
+    account_id:document.getElementById('cf-accid').value,
+    quota:+document.getElementById('cf-quota').value||100000,
+    threshold:+document.getElementById('cf-th').value||90
+  });
+  document.getElementById('cf-name').value='';document.getElementById('cf-token').value='';document.getElementById('cf-accid').value='';
+  renderCF();
+}
+function delCFRow(i){gCF.splice(i,1);renderCF()}
+function renderCF(){
+  var html='<table><thead><tr><th>账号</th><th>Account ID</th><th>额度</th><th>阈值%</th><th></th></tr></thead><tbody>';
+  gCF.forEach(function(a,i){
+    html+='<tr><td>'+esc(a.name)+'</td><td class="code">'+esc(a.account_id)+'</td><td>'+a.quota+'</td><td>'+a.threshold+'</td>'+
+      '<td><button class="btn btn-d" onclick="delCFRow('+i+')">移除</button></td></tr>';
+  });
+  html+='</tbody></table>';
+  document.getElementById('cf-list').innerHTML=html||'(未配置账号)';
+}
+function saveCF(){
+  api('/admin/api/cf',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(gCF)}).then(function(){
+    document.getElementById('msg-cf').className='msg';document.getElementById('msg-cf').textContent='账号已保存';
+    loadCF();
+  }).catch(function(e){document.getElementById('msg-cf').className='err';document.getElementById('msg-cf').textContent='保存失败: '+e});
+}
+function checkCF(){
+  api('/admin/api/cf/check',{method:'POST'}).then(function(d){
+    var txt='';
+    if(d.actions&&d.actions.length){txt='执行: '+d.actions.join('；')}
+    else{txt='配额正常，无切换动作'}
+    document.getElementById('msg-cf').className='msg';document.getElementById('msg-cf').textContent=txt;
+    renderCFUsage(d.usages);
+    loadConfig();
+  }).catch(function(e){document.getElementById('msg-cf').className='err';document.getElementById('msg-cf').textContent='检查失败: '+e});
+}
+function renderCFUsage(usages){
+  if(!usages||!usages.length)return;
+  var html='<h2 style="font-size:13px;margin:10px 0 6px">用量</h2><table><thead><tr><th>账号</th><th>已用请求</th><th>额度</th><th>使用率</th><th>状态</th></tr></thead><tbody>';
+  usages.forEach(function(u){
+    var st = u.error ? '查询失败' : (u.over_limit ? '超阈值' : (u.auto_off ? '自动停用中' : '正常'));
+    var cls = u.error ? 'bad' : (u.over_limit ? 'bad' : 'ok');
+    html+='<tr><td>'+esc(u.name)+'</td><td>'+(u.error?'-':u.used)+'</td><td>'+(u.quota||'-')+'</td><td>'+(u.error?'-':u.percent.toFixed(1)+'%')+'</td>'+
+      '<td><span class="dot '+cls+'"></span>'+st+'</td></tr>';
+  });
+  html+='</tbody></table>';
+  var el=document.getElementById('cf-list');
+  el.innerHTML=el.innerHTML+html;
+}
+function loadCF(){
+  api('/admin/api/cf').then(function(d){
+    gCF=d.accounts||[];
+    renderCF();
+    renderCFUsage(d.usages);
+  });
+}
 
 loadStatus();setInterval(loadStatus,3000);
 </script>

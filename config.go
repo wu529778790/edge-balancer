@@ -9,13 +9,14 @@ import (
 
 // UpstreamConfig 单个上游的静态配置
 type UpstreamConfig struct {
-	Name     string `yaml:"name"`     // 上游名称（站点内唯一标识）
-	URL      string `yaml:"url"`      // 上游地址，如 https://xxx.workers.dev
-	Host     string `yaml:"host"`     // 可选：转发时使用的 Host 头；为空则保留请求原始 Host（本地源站场景）；指向 CF Worker 等需校验 Host 的服务时，填上游域名
-	Weight   int    `yaml:"weight"`   // 分流权重（灰度比例）
-	Priority int    `yaml:"priority"` // 优先级，越小越优先；0 表示默认同一优先级（纯权重分流）
-	Health   string `yaml:"health"`   // 可选：该上游的健康检查路径，覆盖全局 health_path
-	Enabled  *bool  `yaml:"enabled"`  // 可选：是否参与分流；nil 视为 true（兼容旧配置），false 则展示但不转发
+	Name      string `yaml:"name"`       // 上游名称（站点内唯一标识）
+	URL       string `yaml:"url"`        // 上游地址，如 https://xxx.workers.dev
+	Host      string `yaml:"host"`       // 可选：转发时使用的 Host 头；为空则保留请求原始 Host（本地源站场景）；指向 CF Worker 等需校验 Host 的服务时，填上游域名
+	Weight    int    `yaml:"weight"`     // 分流权重（灰度比例）
+	Priority  int    `yaml:"priority"`   // 优先级，越小越优先；0 表示默认同一优先级（纯权重分流）
+	Health    string `yaml:"health"`     // 可选：该上游的健康检查路径，覆盖全局 health_path
+	CFAccount string `yaml:"cf_account"` // 可选：关联的 Cloudflare 账号名（配额监控自动切换用）
+	Enabled   *bool  `yaml:"enabled"`    // 可选：是否参与分流；nil 视为 true（兼容旧配置），false 则展示但不转发
 }
 
 // SiteConfig 单个站点（域名）的配置：按 Host 头路由，每个域名独立一套上游
