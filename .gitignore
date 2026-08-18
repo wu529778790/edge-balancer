@@ -5,6 +5,10 @@ edge-balancer
 # 真实配置（含上游地址，勿提交）
 config.yaml
 
+# 数据库连接（含 Turso token，勿提交）
+.env
+.env.*
+
 # 系统
 .DS_Store
 
