@@ -325,13 +325,15 @@ function loadStatus(){
   }).catch(function(e){document.getElementById('meta').textContent='加载失败: '+e});
 }
 
+var gSites=[];
 function loadConfig(){
   api('/admin/api/sites').then(function(sites){
+    gSites=sites;
     var html='';
     sites.forEach(function(s){
       html+='<div class="card"><div class="site-head"><strong>'+esc(s.domain)+'</strong><span>'+
         '<label style="font-size:12px;color:#57606a"><input type="checkbox" '+(s.enabled?'checked':'')+' onchange="toggleSite('+s.id+',this.checked)"> 启用</label> '+
-        '<button class="btn btn-d" onclick="delSite('+s.id+',\''+esc(s.domain)+'\')">删除</button></span></div>'+
+        '<button class="btn btn-d" onclick="delSite('+s.id+')">删除</button></span></div>'+
         '<table><thead><tr><th>上游</th><th>地址</th><th>host</th><th>权重</th><th>优先级</th><th>健康路径</th><th></th></tr></thead><tbody>';
       s.upstreams.forEach(function(u){
         html+='<tr><td>'+esc(u.name)+'</td><td class="code">'+esc(u.url)+'</td><td class="code">'+esc(u.host||'-')+'</td><td>'+u.weight+'</td><td>'+u.priority+'</td><td>'+esc(u.health||'-')+'</td>'+
@@ -345,7 +347,7 @@ function loadConfig(){
           '<div><label>priority</label><input id="ue-'+u.id+'-priority" type="number" value="'+u.priority+'" size="5"></div>'+
           '<div><label>health</label><input id="ue-'+u.id+'-health" value="'+esc(u.health||'')+'" size="10" placeholder="可选"></div>'+
           '<button class="btn btn-p" onclick="saveUp('+u.id+')">保存</button> '+
-          '<button class="btn" onclick="toggle('upedit-'+u.id+')">取消</button></div></div></td></tr>';
+          '<button class="btn" onclick="editUpForm('+u.id+')">取消</button></div></div></td></tr>';
       });
       html+='</tbody></table>'+
         '<div class="frm"><div class="row" style="align-items:flex-end">'+
@@ -392,7 +394,7 @@ function createSite(){
   })}).then(function(){document.getElementById('ns-domain').value='';loadConfig()});
 }
 function toggleSite(id,on){api('/admin/api/sites/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:on})}).then(loadConfig)}
-function delSite(id,dom){if(!confirm('删除站点 '+dom+' 及其全部上游？'))return;api('/admin/api/sites/'+id,{method:'DELETE'}).then(loadConfig)}
+function delSite(id){var s=gSites.find(function(x){return x.id===id});if(!s)return;if(!confirm('删除站点 '+s.domain+' 及其全部上游？'))return;api('/admin/api/sites/'+id,{method:'DELETE'}).then(loadConfig)}
 function addUp(sid){
   api('/admin/api/sites/'+sid+'/upstreams',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
     name:document.getElementById('nu-'+sid+'-name').value,
