@@ -535,14 +535,25 @@ var gCF=[];
 function loadCF(){
   api('/admin/api/cf').then(function(d){
     gCF=d.accounts||[];
-    renderCF();
-    renderCFUsage(d.usages);
+    renderCF(gCF, d.usages||[]);
   });
 }
-function renderCF(){
-  var html='<table><thead><tr><th>账号</th><th>Account ID</th><th>额度</th><th>阈值%</th><th></th></tr></thead><tbody>';
-  gCF.forEach(function(a,i){
-    html+='<tr><td>'+esc(a.name)+'</td><td class="code">'+esc(a.account_id)+'</td><td>'+fmt(a.quota)+'</td><td>'+a.threshold+'</td>'+
+function renderCF(accounts,usages){
+  usages=usages||[];
+  var html='<table><thead><tr><th>账号</th><th>Account ID</th><th>额度</th><th>阈值%</th><th>已用请求</th><th>使用率</th><th></th></tr></thead><tbody>';
+  accounts.forEach(function(a,i){
+    var u=null;for(var k=0;k<usages.length;k++){if(usages[k].name===a.name){u=usages[k];break}}
+    u=u||{name:a.name,used:0,percent:0,over_limit:false,auto_off:false,error:null};
+    var st,cls,pct;
+    if(u.error){st='查询失败';cls='bad';pct=0}
+    else if(u.over_limit){st='超阈值';cls='bad';pct=Math.min(u.percent,100)}
+    else if(u.auto_off){st='自动停用中';cls='warn';pct=Math.min(u.percent,100)}
+    else{st='正常';cls='ok';pct=Math.min(u.percent,100)}
+    var barCls=(u.over_limit?'bad':(pct>=(a.threshold||90)?'warn':''));
+    html+='<tr><td>'+esc(a.name)+' '+(st?'<span class="badge '+cls+'" style="margin-left:6px"><span class="dot"></span>'+st+'</span>':'')+'</td>'+
+      '<td class="code">'+esc(a.account_id)+'</td><td>'+fmt(a.quota)+'</td><td>'+a.threshold+'</td>'+
+      '<td class="code">'+(u.error?'-':fmt(u.used))+'</td>'+
+      '<td><div style="display:flex;align-items:center;gap:8px"><div class="usage-bar"><i class="'+barCls+'" style="width:'+pct+'%"></i></div><span style="font-size:12px;color:var(--text-2)">'+(u.error?'-':u.percent.toFixed(1)+'%')+'</span></div></td>'+
       '<td><button class="btn btn-sm" onclick="openCFModal('+i+')">编辑</button> <button class="btn btn-d btn-sm" onclick="delCFRow('+i+')">删除</button></td></tr>';
   });
   html+='</tbody></table>';
@@ -581,28 +592,9 @@ function checkCF(){
     if(d.actions&&d.actions.length){txt='执行: '+d.actions.join('；')}
     else{txt='配额正常，无切换动作'}
     document.getElementById('msg-cf').className='msg';document.getElementById('msg-cf').textContent=txt;
-    renderCFUsage(d.usages);
+    renderCF(gCF, d.usages||[]);
     loadConfig();
   }).catch(function(e){document.getElementById('msg-cf').className='err';document.getElementById('msg-cf').textContent='检查失败: '+e});
-}
-function renderCFUsage(usages){
-  if(!usages||!usages.length)return;
-  var html='<div class="card-head" style="padding:14px 0 6px"><h2 style="font-size:14px">用量</h2></div>'+
-    '<table><thead><tr><th>账号</th><th>已用请求</th><th>额度</th><th>使用率</th><th>状态</th></tr></thead><tbody>';
-  usages.forEach(function(u){
-    var st,cls,pct;
-    if(u.error){st='查询失败';cls='bad';pct=0}
-    else if(u.over_limit){st='超阈值';cls='bad';pct=Math.min(u.percent,100)}
-    else if(u.auto_off){st='自动停用中';cls='warn';pct=Math.min(u.percent,100)}
-    else{st='正常';cls='ok';pct=Math.min(u.percent,100)}
-    var barCls=(u.over_limit?'bad':(pct>=(u.threshold||90)?'warn':''));
-    html+='<tr><td>'+esc(u.name)+'</td><td class="code">'+(u.error?'-':fmt(u.used))+'</td><td class="code">'+(u.quota?fmt(u.quota):'-')+'</td>'+
-      '<td style="display:flex;align-items:center;gap:8px"><div class="usage-bar"><i class="'+barCls+'" style="width:'+pct+'%"></i></div><span style="font-size:12px;color:var(--text-2)">'+(u.error?'-':u.percent.toFixed(1)+'%')+'</span></td>'+
-      '<td><span class="badge '+cls+'"><span class="dot"></span>'+st+'</span></td></tr>';
-  });
-  html+='</tbody></table>';
-  var el=document.getElementById('cf-list');
-  el.innerHTML=el.innerHTML+'<div style="margin-top:8px">'+html+'</div>';
 }
 
 loadStatus();setInterval(loadStatus,3000);
