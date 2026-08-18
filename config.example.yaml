@@ -6,6 +6,10 @@ health_interval: 10           # 健康检查间隔（秒）
 health_timeout: 5             # 健康检查超时（秒）
 health_path: "/api/health"    # 默认健康检查路径
 
+# 状态面板（v2）：访问 <listen>/admin 查看上游健康与流量分配
+# admin_path: "/admin"         # 面板路径，默认 /admin
+# admin_token: "your-token"    # 可选：访问面板需要的 token（留空则不鉴权，公网部署强烈建议配置）
+
 # 负载均衡策略（同一优先级组内）：
 #   least-conn  最少连接（推荐：动态均衡，避免某台上游被压垮）
 #   weighted    加权随机（默认）

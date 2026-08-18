@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -17,8 +18,9 @@ type Upstream struct {
 	Priority int
 	Health   string // 健康检查路径（空则用全局默认）
 
-	healthy  atomic.Bool
-	inFlight atomic.Int64
+	healthy       atomic.Bool
+	inFlight      atomic.Int64
+	totalRequests atomic.Int64
 }
 
 // IsHealthy 是否健康
@@ -27,11 +29,17 @@ func (u *Upstream) IsHealthy() bool { return u.healthy.Load() }
 // InFlight 当前在途请求数（用于 least-conn 策略）
 func (u *Upstream) InFlight() int64 { return u.inFlight.Load() }
 
+// TotalRequests 累计转发请求数（用于状态面板）
+func (u *Upstream) TotalRequests() int64 { return u.totalRequests.Load() }
+
 // Enter 请求进入（在途 +1）
 func (u *Upstream) Enter() { u.inFlight.Add(1) }
 
 // Leave 请求完成（在途 -1）
 func (u *Upstream) Leave() { u.inFlight.Add(-1) }
+
+// AddRequest 转发成功计数
+func (u *Upstream) AddRequest() { u.totalRequests.Add(1) }
 
 // HealthChecker 定时探测上游健康状态
 type HealthChecker struct {
@@ -99,10 +107,13 @@ func (h *HealthChecker) checkOne(u *Upstream) {
 	target := strings.TrimRight(u.URL, "/") + path
 
 	resp, err := h.client.Get(target)
-	if err != nil {
-		u.healthy.Store(false)
-		return
+	healthy := false
+	if err == nil {
+		resp.Body.Close()
+		healthy = resp.StatusCode >= 200 && resp.StatusCode < 400
 	}
-	resp.Body.Close()
-	u.healthy.Store(resp.StatusCode >= 200 && resp.StatusCode < 400)
+	if u.healthy.Load() != healthy {
+		log.Printf("上游 %-16s 健康状态变化: %v (%s)", u.Name, healthy, target)
+	}
+	u.healthy.Store(healthy)
 }

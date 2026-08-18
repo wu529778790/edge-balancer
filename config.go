@@ -23,6 +23,8 @@ type Config struct {
 	HealthTimeout  int              `yaml:"health_timeout"`  // 健康检查超时（秒），默认 5
 	HealthPath     string           `yaml:"health_path"`     // 默认健康检查路径
 	Strategy       string           `yaml:"strategy"`        // 负载均衡策略：least-conn（最少连接）/ weighted（加权随机，默认）
+	AdminPath      string           `yaml:"admin_path"`      // 状态面板路径，默认 /admin
+	AdminToken     string           `yaml:"admin_token"`     // 状态面板访问 token（可选，空则不鉴权）
 	Upstreams      []UpstreamConfig `yaml:"upstreams"`       // 上游列表
 }
 
@@ -53,6 +55,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.Strategy == "" {
 		cfg.Strategy = "weighted"
+	}
+	if cfg.AdminPath == "" {
+		cfg.AdminPath = "/admin"
 	}
 
 	// 校验上游

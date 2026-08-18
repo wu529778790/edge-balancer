@@ -45,7 +45,7 @@ func main() {
 	checker.Start(ctx)
 
 	// 分流器
-	balancer := NewBalancer(upstreams, cfg.Strategy)
+	balancer := NewBalancer(upstreams, cfg.Strategy, cfg.AdminPath, cfg.AdminToken)
 
 	server := &http.Server{
 		Addr:    cfg.Listen,
