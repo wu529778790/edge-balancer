@@ -93,13 +93,25 @@ func NewSite(cfg config.SiteConfig, defaultStrategy, defaultHealthPath string, o
 func (s *Site) Proxy(name string) *httputil.ReverseProxy { return s.proxies[name] }
 
 // Pick 选择上游：先按优先级取最高优先级的健康组，组内再按策略选。
-// 已停用（enabled=false）、不健康或处于熔断（Tripped）的上游不参与分流，但仍展示在状态面板中
+// 已停用（enabled=false）、不健康（healthy=false）或处于熔断（Tripped）的上游不参与正常分流；
+// 若所有健康上游都处于熔断（例如外网线路差 + 内网偶发 5xx 同时发生），降级为
+// 从健康上游中选"熔断剩余最短（最先恢复）"的顶上，避免站点彻底 503——上游恢复后一次请求即正常接管
 func (s *Site) Pick() *Upstream {
+	if u := s.pick(false); u != nil {
+		return u
+	}
+	return s.pick(true)
+}
+
+func (s *Site) pick(includeTripped bool) *Upstream {
 	// 找最高优先级（数值最小）的健康组
 	bestPriority := int(^uint(0) >> 1)
 	var group []*Upstream
 	for _, u := range s.Upstreams {
-		if !u.Enabled || !u.IsHealthy() || u.Tripped() {
+		if !u.Enabled || !u.IsHealthy() {
+			continue
+		}
+		if !includeTripped && u.Tripped() {
 			continue
 		}
 		if u.Priority < bestPriority {
@@ -112,11 +124,25 @@ func (s *Site) Pick() *Upstream {
 	if len(group) == 0 {
 		return nil
 	}
-
+	if includeTripped {
+		// 降级模式：全部熔断中，选最先恢复（熔断截止最早）的上游
+		return pickEarliestRecover(group)
+	}
 	if s.Strategy == "least-conn" {
 		return pickLeastConn(group)
 	}
 	return pickWeighted(group)
+}
+
+// pickEarliestRecover 熔断降级：选 tripUntil 最早（最接近恢复）的上游
+func pickEarliestRecover(group []*Upstream) *Upstream {
+	best := group[0]
+	for _, u := range group[1:] {
+		if u.tripUntil.Load() < best.tripUntil.Load() {
+			best = u
+		}
+	}
+	return best
 }
 
 // pickWeighted 组内加权随机

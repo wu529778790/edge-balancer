@@ -57,7 +57,8 @@ func (u *Upstream) Leave() { u.inFlight.Add(-1) }
 // AddRequest 转发成功计数
 func (u *Upstream) AddRequest() { u.totalRequests.Add(1) }
 
-// Fail 记录一次转发失败（超时/连接错误/客户端取消）。连续失败达到阈值则熔断
+// Fail 记录一次转发失败（超时/连接错误/客户端取消）。连续失败达到阈值则熔断。
+// 内网上游同样参与熔断（内网也会挂，不熔断会 502 死循环）；全部熔断时的兜底由 Pick 降级处理
 func (u *Upstream) Fail() {
 	if u.failCount.Add(1) >= tripFailThreshold {
 		u.tripUntil.Store(time.Now().Add(tripCoolDown).Unix())
@@ -70,6 +71,8 @@ func (u *Upstream) Fail() {
 func (u *Upstream) Tripped() bool {
 	return time.Now().Unix() < u.tripUntil.Load()
 }
+
+// HealthChecker 定时探测上游健康状态
 
 // HealthChecker 定时探测上游健康状态
 type HealthChecker struct {

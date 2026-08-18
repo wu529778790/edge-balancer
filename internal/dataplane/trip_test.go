@@ -64,3 +64,64 @@ func TestTripStatePreservedAcrossReload(t *testing.T) {
 		t.Fatalf("保留的失败计数应继续累计并触发熔断")
 	}
 }
+
+// 内网上游同样参与熔断（内网也会挂，不熔断会 502 死循环）
+func TestInternalUpstreamAlsoTrips(t *testing.T) {
+	internal := &Upstream{Name: "docker", URL: "http://127.0.0.1:5253"}
+	for i := 0; i < 3; i++ {
+		internal.Fail()
+	}
+	if !internal.Tripped() {
+		t.Fatalf("内网上游连续失败 3 次也应熔断")
+	}
+}
+
+// 全部健康上游熔断时：Pick 降级，选"最先恢复"（熔断截止最早）的上游顶上，避免站点 503
+func TestPickDegradesWhenAllTripped(t *testing.T) {
+	mk := func(name string, url string, priority int, tripIn time.Duration) *Upstream {
+		u := &Upstream{Name: name, URL: url, Priority: priority, Enabled: true}
+		u.healthy.Store(true)
+		u.tripUntil.Store(time.Now().Add(tripIn).Unix())
+		return u
+	}
+	s := &Site{
+		Domain:   "a.test",
+		Strategy: "weighted",
+		Upstreams: []*Upstream{
+			mk("w1", "https://a.workers.dev", 1, 5*time.Second),   // 5s 后恢复
+			mk("docker", "http://127.0.0.1:1", 2, 50*time.Second), // 50s 后恢复
+			mk("w2", "https://b.workers.dev", 3, 20*time.Second),  // 20s 后恢复
+		},
+	}
+	picked := s.Pick()
+	if picked == nil {
+		t.Fatalf("全部熔断时 Pick 不应返回 nil（应降级）")
+	}
+	if picked.Name != "w1" {
+		t.Fatalf("降级应选最先恢复的上游 w1(5s)，实际选 %s", picked.Name)
+	}
+}
+
+// 有未熔断候选时不降级：熔断中的高优先级上游被跳过，选中未熔断的
+func TestPickPrefersNonTripped(t *testing.T) {
+	mk := func(name string, url string, priority int, tripped bool) *Upstream {
+		u := &Upstream{Name: name, URL: url, Priority: priority, Enabled: true}
+		u.healthy.Store(true)
+		if tripped {
+			u.tripUntil.Store(time.Now().Add(time.Minute).Unix())
+		}
+		return u
+	}
+	s := &Site{
+		Domain:   "a.test",
+		Strategy: "weighted",
+		Upstreams: []*Upstream{
+			mk("w1", "https://a.workers.dev", 1, true),  // 熔断中
+			mk("docker", "http://127.0.0.1:1", 2, false), // 未熔断
+		},
+	}
+	picked := s.Pick()
+	if picked == nil || picked.Name != "docker" {
+		t.Fatalf("应跳过熔断中的 w1 选 docker，实际 %v", picked)
+	}
+}

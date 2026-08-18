@@ -125,7 +125,7 @@ func (b *Balancer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	sw := &statusWriter{ResponseWriter: nc}
 	proxy.ServeHTTP(sw, r.WithContext(ctx))
-	// 响应 >=500（含上游 5xx 与转发层 502）视为访问失败，计入熔断
+	// 响应 >=500 视为访问失败，计入熔断（内网同样参与；全部熔断时由 Pick 降级兜底）
 	if sw.status >= 500 {
 		up.Fail()
 	}
