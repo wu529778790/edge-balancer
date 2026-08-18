@@ -95,7 +95,7 @@ jobs:
               --log-opt max-size=10m \
               --log-opt max-file=3 \
               -v "$CONFIG_DIR/config.yaml:/app/config.yaml:ro" \
-              -p 6704:8080 \
+              -p 6705:8080 \
               "$IMAGE"
 
             sudo docker image prune -f
