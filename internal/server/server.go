@@ -68,7 +68,7 @@ func (s *Server) reload() error {
 		upstreams = append(upstreams, site.Upstreams...)
 	}
 
-	b := dataplane.NewBalancer(sites, s.admin)
+	b := dataplane.NewBalancer(sites, s.admin, time.Duration(cfg.UpstreamTimeout)*time.Second)
 	s.balancer.Store(b)
 
 	// 重建健康检查

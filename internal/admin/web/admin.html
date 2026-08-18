@@ -74,6 +74,7 @@ tr.up-off{opacity:.55}
 .badge.ok{background:var(--ok-soft);color:var(--ok-text)} .badge.ok .dot{background:var(--ok)}
 .badge.bad{background:var(--bad-soft);color:var(--bad-text)} .badge.bad .dot{background:var(--bad)}
 .badge.off{background:var(--off-soft);color:#6B7280} .badge.off .dot{background:var(--off)}
+.badge.warn{background:var(--warn-soft);color:#B45309} .badge.warn .dot{background:var(--warn)}
 .badge.strategy{background:var(--primary-soft);color:var(--primary)}
 .badge.tag{background:#F1F2F4;color:#57606A}
 /* ---------- 表单 ---------- */
@@ -260,6 +261,7 @@ input:focus,select:focus{outline:2px solid var(--primary-soft);border-color:var(
               <div><label>健康检查超时（秒）</label><input id="set-ht" size="6" type="number" value="5"></div>
               <div><label>健康检查路径</label><input id="set-hp" size="12" value="/api/health"></div>
               <div><label>默认均衡策略</label><select id="set-strategy"><option value="least-conn">least-conn</option><option value="weighted">weighted</option></select></div>
+              <div><label>上游转发超时（秒，超时自动熔断切换）</label><input id="set-ut" size="6" type="number" value="10"></div>
               <button class="btn btn-p" onclick="saveSettings()">保存全局设置</button>
             </div></div>
             <div id="msg-settings"></div>
@@ -401,6 +403,7 @@ function loadStatus(){
       s.upstreams.forEach(function(x){
         var st,cls;
         if(!x.enabled){st='已停用';cls='off'}
+        else if(x.tripped){st='熔断中';cls='warn'}
         else if(x.healthy){st='健康';cls='ok'}
         else{st='不健康';cls='bad'}
         html+='<tr'+(x.enabled?'':' class="up-off"')+'><td>'+esc(x.name)+'</td><td class="code">'+esc(x.url)+'</td>'+
@@ -505,6 +508,7 @@ function loadSettings(){
     if(m['health_timeout'])document.getElementById('set-ht').value=m['health_timeout'];
     if(m['health_path'])document.getElementById('set-hp').value=m['health_path'];
     if(m['strategy'])document.getElementById('set-strategy').value=m['strategy'];
+    if(m['upstream_timeout'])document.getElementById('set-ut').value=m['upstream_timeout'];
   });
 }
 function saveSettings(){
@@ -514,6 +518,7 @@ function saveSettings(){
   body['health_timeout']=document.getElementById('set-ht').value;
   body['health_path']=document.getElementById('set-hp').value;
   body['strategy']=document.getElementById('set-strategy').value;
+  body['upstream_timeout']=document.getElementById('set-ut').value;
   api('/admin/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(){
     document.getElementById('msg-settings').className='msg';document.getElementById('msg-settings').textContent='全局设置已保存并生效';
   }).catch(function(e){document.getElementById('msg-settings').className='err';document.getElementById('msg-settings').textContent='保存失败: '+e});

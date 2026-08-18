@@ -25,8 +25,19 @@ type Upstream struct {
 	inFlight      atomic.Int64
 	totalRequests atomic.Int64
 
+	// 请求级熔断（区别于定时健康检查）：连续转发失败达到阈值后临时熔断，
+	// 熔断期间不参与选路，冷却后自动恢复（半开）。用于拦截"健康检查通过但实际转发慢"的上游。
+	failCount atomic.Int64
+	tripUntil atomic.Int64 // 熔断截止的 unix 秒；0 或已过期为未熔断
+
 	healthPath string // 最终健康检查路径（上游 > 站点 > 全局）
 }
+
+// 熔断参数：连续失败阈值与冷却时长（暂为内置常量，可后续配置化）
+const (
+	tripFailThreshold int64 = 3
+	tripCoolDown            = 30 * time.Second
+)
 
 // IsHealthy 是否健康
 func (u *Upstream) IsHealthy() bool { return u.healthy.Load() }
@@ -45,6 +56,20 @@ func (u *Upstream) Leave() { u.inFlight.Add(-1) }
 
 // AddRequest 转发成功计数
 func (u *Upstream) AddRequest() { u.totalRequests.Add(1) }
+
+// Fail 记录一次转发失败（超时/连接错误/客户端取消）。连续失败达到阈值则熔断
+func (u *Upstream) Fail() {
+	if u.failCount.Add(1) >= tripFailThreshold {
+		u.tripUntil.Store(time.Now().Add(tripCoolDown).Unix())
+		u.failCount.Store(0)
+		log.Printf("上游 %s/%s 连续失败 %d 次，熔断 %s", u.Site, u.Name, tripFailThreshold, tripCoolDown)
+	}
+}
+
+// Tripped 当前是否处于熔断状态（熔断期间不参与选路；冷却结束后自动半开恢复）
+func (u *Upstream) Tripped() bool {
+	return time.Now().Unix() < u.tripUntil.Load()
+}
 
 // HealthChecker 定时探测上游健康状态
 type HealthChecker struct {

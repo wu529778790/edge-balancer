@@ -218,6 +218,11 @@ func (s *Store) LoadConfig() (*config.Config, error) {
 	if v := settings["strategy"]; v != "" {
 		cfg.Strategy = v
 	}
+	if v := settings["upstream_timeout"]; v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.UpstreamTimeout = n
+		}
+	}
 	if v := settings["health_interval"]; v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.HealthInterval = n

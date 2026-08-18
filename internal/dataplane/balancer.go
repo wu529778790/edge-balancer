@@ -2,6 +2,7 @@ package dataplane
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -27,6 +28,7 @@ type UpstreamStatus struct {
 	URL      string `json:"url"`
 	Healthy  bool   `json:"healthy"`
 	Enabled  bool   `json:"enabled"`
+	Tripped  bool   `json:"tripped"` // 请求级熔断中（连续转发失败临时剔除）
 	Weight   int    `json:"weight"`
 	Priority int    `json:"priority"`
 	InFlight int64  `json:"inFlight"`
@@ -54,6 +56,7 @@ type Balancer struct {
 	byHost map[string]*Site
 
 	unmatched http.Handler // 未匹配域名时的处理器（管理面板），需自行鉴权
+	timeout   time.Duration // 单次转发超时；超时计入上游熔断失败
 
 	logMu  sync.Mutex
 	reqLog []ReqEntry
@@ -61,12 +64,14 @@ type Balancer struct {
 }
 
 // NewBalancer 构造分流器，按域名建立路由表。
-// unmatched 处理未匹配域名的请求（管理面板入口），其内部负责 token 鉴权与渲染。
-func NewBalancer(sites []*Site, unmatched http.Handler) *Balancer {
+// unmatched 处理未匹配域名的请求（管理面板入口），其内部负责 token 鉴权与渲染；
+// timeout 为单次转发超时（超时 → 502 + 上游熔断计数）。
+func NewBalancer(sites []*Site, unmatched http.Handler, timeout time.Duration) *Balancer {
 	b := &Balancer{
 		sites:     sites,
 		byHost:    make(map[string]*Site, len(sites)),
 		unmatched: unmatched,
+		timeout:   timeout,
 		maxLog:    200,
 	}
 	for _, s := range sites {
@@ -112,7 +117,10 @@ func (b *Balancer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	up.AddRequest()
 	b.logRequest(r, site.Domain, up.Name)
 	defer up.Leave()
-	proxy.ServeHTTP(nc, r)
+	// 单次转发超时：超时返回 502 并计入上游熔断失败，后续请求自动切到其它上游
+	ctx, cancel := context.WithTimeout(r.Context(), b.timeout)
+	defer cancel()
+	proxy.ServeHTTP(nc, r.WithContext(ctx))
 }
 
 // noCacheWriter 强制响应带 no-store，阻止 nginx/CF 等中间层缓存动态内容
@@ -176,6 +184,7 @@ func (b *Balancer) Status() Status {
 				URL:      u.URL,
 				Healthy:  u.IsHealthy(),
 				Enabled:  u.Enabled,
+				Tripped:  u.Tripped(),
 				Weight:   u.Weight,
 				Priority: u.Priority,
 				InFlight: u.InFlight(),

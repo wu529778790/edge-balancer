@@ -20,6 +20,10 @@ admin_token: "your-token"     # 可选：访问面板需要的 token（留空则
 #   weighted    加权随机（默认）
 strategy: "least-conn"
 
+# 上游转发超时（秒）：单次转发超过该时长即返回 502，
+# 并计入该上游的熔断失败计数（连续 3 次失败熔断 30 秒，期间自动切到其它上游）
+upstream_timeout: 10
+
 # 站点列表：每个域名一组上游配置
 sites:
   - domain: "panhub.shenzjd.com"   # 业务域名（匹配 Host 头）

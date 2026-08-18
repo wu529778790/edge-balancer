@@ -59,8 +59,10 @@ func NewSite(cfg config.SiteConfig, defaultStrategy, defaultHealthPath string) *
 		if target, err := url.Parse(uc.URL); err == nil {
 			proxy := httputil.NewSingleHostReverseProxy(target)
 			// 客户端主动取消（context canceled）是正常现象（刷新/切换/超时等），
-			// 静默处理避免刷日志；其余转发错误才记日志并返回 502
+			// 静默处理避免刷日志；但无论哪种错误都计入熔断失败——
+			// 客户端取消往往意味着上游响应太慢，正是需要熔断的信号
 			proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+				u.Fail()
 				if errors.Is(err, context.Canceled) {
 					return
 				}
@@ -85,14 +87,14 @@ func NewSite(cfg config.SiteConfig, defaultStrategy, defaultHealthPath string) *
 // Proxy 取上游对应的反向代理
 func (s *Site) Proxy(name string) *httputil.ReverseProxy { return s.proxies[name] }
 
-// Pick 选择上游：先按优先级取最高优先级的健康组，组内再按策略选
-// 已停用（enabled=false）的上游不参与分流，但仍展示在状态面板中
+// Pick 选择上游：先按优先级取最高优先级的健康组，组内再按策略选。
+// 已停用（enabled=false）、不健康或处于熔断（Tripped）的上游不参与分流，但仍展示在状态面板中
 func (s *Site) Pick() *Upstream {
 	// 找最高优先级（数值最小）的健康组
 	bestPriority := int(^uint(0) >> 1)
 	var group []*Upstream
 	for _, u := range s.Upstreams {
-		if !u.Enabled || !u.IsHealthy() {
+		if !u.Enabled || !u.IsHealthy() || u.Tripped() {
 			continue
 		}
 		if u.Priority < bestPriority {
