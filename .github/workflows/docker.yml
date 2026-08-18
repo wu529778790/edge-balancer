@@ -73,7 +73,7 @@ jobs:
             set -e
             IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]'):latest"
             CONTAINER="${{ github.event.repository.name }}"
-            CONFIG_FILE="/opt/edge-balancer/config.yaml"
+            CONFIG_FILE="/opt/1panel/apps/openresty/openresty/www/sites/edge-balancer.shenzjd.com/index/config.yaml"
 
             # 配置文件由服务器本地维护（1Panel 文件管理或 SSH 提前放好）：
             # CI 只负责部署，配置不经过 GitHub Secrets、也不进镜像。
