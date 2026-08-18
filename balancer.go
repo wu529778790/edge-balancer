@@ -303,7 +303,7 @@ input,select{font-size:12px;padding:5px 8px;border:1px solid #d4d7dd;border-radi
 function qs(k){return new URLSearchParams(location.search).get(k)}
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
 function api(path,opts){var u=path;var t=qs('token');if(t)u+=(u.indexOf('?')<0?'?':'&')+'token='+encodeURIComponent(t);return fetch(u,opts).then(function(r){return r.json().catch(function(){return {}})})}
-function showTab(n){document.getElementById('tab-status').className='tab'+(n==='status'?' on':'');document.getElementById('tab-config').className='tab'+(n==='config'?' on':'');document.getElementById('panel-status').style.display=n==='status'?'':'none';document.getElementById('panel-config').style.display=n==='config'?'':'none';if(n==='config')loadConfig()}
+function showTab(n){document.getElementById('tab-status').className='tab'+(n==='status'?' on':'');document.getElementById('tab-config').className='tab'+(n==='config'?' on':'');document.getElementById('panel-status').style.display=n==='status'?'block':'none';document.getElementById('panel-config').style.display=n==='config'?'block':'none';if(n==='config')loadConfig()}
 
 function loadStatus(){
   api('/admin/api').then(function(d){
