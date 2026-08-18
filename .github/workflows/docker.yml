@@ -1,0 +1,101 @@
+# 构建、推送到 GHCR 并部署到服务器
+name: Build, publish and deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # 阶段一：构建镜像并推送到 GitHub Container Registry
+  build-and-push-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # 始终产出 latest 标签，方便部署阶段直接 pull :latest
+          flavor: |
+            latest=true
+
+      - name: Build and push Docker image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v1
+        continue-on-error: true
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  # 阶段二：通过 SSH 登录服务器，拉取最新镜像并重启容器
+  deploy:
+    needs: build-and-push-image
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1
+        env:
+          # config.yaml 内容以 GitHub Secret 形式注入，运行时写入服务器，绝不打包进镜像
+          CONFIG_YAML: ${{ secrets.CONFIG_YAML }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          password: ${{ secrets.DEPLOY_PASSWORD }}
+          envs: CONFIG_YAML
+          script: |
+            IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]'):latest"
+            CONTAINER="${{ github.event.repository.name }}"
+            CONFIG_DIR="/opt/edge-balancer"
+
+            # 写入最新配置（运行时从 secret 读取）
+            mkdir -p "$CONFIG_DIR"
+            printf '%s\n' "$CONFIG_YAML" > "$CONFIG_DIR/config.yaml"
+
+            sudo docker pull "$IMAGE"
+            sudo docker stop "$CONTAINER" || true
+            sudo docker rm "$CONTAINER" || true
+
+            sudo docker run -d \
+              --name "$CONTAINER" \
+              --restart unless-stopped \
+              --memory=256m \
+              --memory-swap=384m \
+              --cpus=0.5 \
+              --log-opt max-size=10m \
+              --log-opt max-file=3 \
+              -v "$CONFIG_DIR/config.yaml:/app/config.yaml:ro" \
+              -p 6704:8080 \
+              "$IMAGE"
+
+            sudo docker image prune -f
