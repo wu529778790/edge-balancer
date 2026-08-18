@@ -84,7 +84,7 @@ jobs:
 
             # 数据库连接（v3）：从服务器本地 .env 读取（EDGE_DB_URL/EDGE_DB_TOKEN/EDGE_LISTEN），
             # 敏感信息不进 GitHub；没有 .env 时回退文件配置模式
-            ENV_FILE="/opt/edge-balancer/.env"
+            ENV_FILE="/opt/1panel/apps/openresty/openresty/www/sites/edge-balancer.shenzjd.com/index/.env"
             ENV_ARGS=""
             if [ -f "$ENV_FILE" ]; then
               ENV_ARGS="--env-file $ENV_FILE"
