@@ -102,6 +102,45 @@ func TestPickDegradesWhenAllTripped(t *testing.T) {
 	}
 }
 
+// 只有独苗上游时不熔断（hasSpare=false，Balancer 不调 Fail）
+func TestNoTripWhenSingleUpstream(t *testing.T) {
+	s := testSite() // 单上游
+	if s.hasSpare() {
+		t.Fatalf("单上游站点 hasSpare 应为 false")
+	}
+}
+
+// 配置多个但只启用 1 个：视为独苗，同样不熔断
+func TestNoTripWhenOnlyOneEnabled(t *testing.T) {
+	cfg := config.SiteConfig{
+		Domain: "a.test",
+		Upstreams: []config.UpstreamConfig{
+			{Name: "a", URL: "http://127.0.0.1:1"},
+			{Name: "b", URL: "http://127.0.0.1:2"},
+		},
+	}
+	s := NewSite(cfg, "weighted", "/api/health", nil)
+	s.Upstreams[1].Enabled = false
+	if s.hasSpare() {
+		t.Fatalf("仅 1 个启用时 hasSpare 应为 false")
+	}
+}
+
+// 有备胎（enabled > 1）时才熔断
+func TestHasSpareWithTwoEnabled(t *testing.T) {
+	cfg := config.SiteConfig{
+		Domain: "a.test",
+		Upstreams: []config.UpstreamConfig{
+			{Name: "a", URL: "http://127.0.0.1:1"},
+			{Name: "b", URL: "http://127.0.0.1:2"},
+		},
+	}
+	s := NewSite(cfg, "weighted", "/api/health", nil)
+	if !s.hasSpare() {
+		t.Fatalf("双上游 hasSpare 应为 true")
+	}
+}
+
 // 有未熔断候选时不降级：熔断中的高优先级上游被跳过，选中未熔断的
 func TestPickPrefersNonTripped(t *testing.T) {
 	mk := func(name string, url string, priority int, tripped bool) *Upstream {

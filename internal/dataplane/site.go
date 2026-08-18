@@ -134,6 +134,18 @@ func (s *Site) pick(includeTripped bool) *Upstream {
 	return pickWeighted(group)
 }
 
+// hasSpare 是否有备胎上游（enabled 数量 > 1）。
+// 只有独苗时不熔断：没有可切换目标，熔断只会抖动/刷日志，直接转发即可
+func (s *Site) hasSpare() bool {
+	n := 0
+	for _, u := range s.Upstreams {
+		if u.Enabled {
+			n++
+		}
+	}
+	return n > 1
+}
+
 // pickEarliestRecover 熔断降级：选 tripUntil 最早（最接近恢复）的上游
 func pickEarliestRecover(group []*Upstream) *Upstream {
 	best := group[0]
