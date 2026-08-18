@@ -2,6 +2,7 @@ package main
 
 import (
 	"math/rand"
+	"net/http"
 	"net/http/httputil"
 	"net/url"
 )
@@ -45,7 +46,17 @@ func NewSite(cfg SiteConfig, defaultStrategy, defaultHealthPath string) *Site {
 		}
 		s.Upstreams = append(s.Upstreams, u)
 		if target, err := url.Parse(uc.URL); err == nil {
-			s.proxies[u.Name] = httputil.NewSingleHostReverseProxy(target)
+			proxy := httputil.NewSingleHostReverseProxy(target)
+			if uc.Host != "" {
+				// 指定了 host 字段：转发时重写 Host 头（CF Worker 等校验 Host 的服务必需）
+				host := uc.Host
+				defaultDirector := proxy.Director
+				proxy.Director = func(req *http.Request) {
+					defaultDirector(req)
+					req.Host = host
+				}
+			}
+			s.proxies[u.Name] = proxy
 		}
 	}
 	return s
