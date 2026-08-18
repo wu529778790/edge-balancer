@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"log"
 	"math/rand"
 	"net/http"
 	"net/http/httputil"
@@ -52,6 +55,15 @@ func NewSite(cfg SiteConfig, defaultStrategy, defaultHealthPath string) *Site {
 		s.Upstreams = append(s.Upstreams, u)
 		if target, err := url.Parse(uc.URL); err == nil {
 			proxy := httputil.NewSingleHostReverseProxy(target)
+			// 客户端主动取消（context canceled）是正常现象（刷新/切换/超时等），
+			// 静默处理避免刷日志；其余转发错误才记日志并返回 502
+			proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+				if errors.Is(err, context.Canceled) {
+					return
+				}
+				log.Printf("转发 %s/%s 失败: %v", s.Domain, u.Name, err)
+				http.Error(w, "bad gateway", http.StatusBadGateway)
+			}
 			if uc.Host != "" {
 				// 指定了 host 字段：转发时重写 Host 头（CF Worker 等校验 Host 的服务必需）
 				host := uc.Host
