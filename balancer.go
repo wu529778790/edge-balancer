@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -58,9 +61,14 @@ func (b *Balancer) matchSite(host string) *Site {
 
 // ServeHTTP 实现 http.Handler
 func (b *Balancer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// 禁用一切缓存：edge-balancer 是动态代理，任何一层 nginx/CF 缓存都会导致
+	// 不同域名的内容互相污染（本次线上事故根因：openresty proxy_cache 缓存 key
+	// 不区分域名，panhub 内容被所有域名共享命中）
+	nc := &noCacheWriter{ResponseWriter: w}
+
 	// 管理面板路由（避免与上游业务路径冲突）
 	if b.adminPath != "" && (r.URL.Path == b.adminPath || strings.HasPrefix(r.URL.Path, b.adminPath+"/")) {
-		b.serveAdmin(w, r)
+		b.serveAdmin(nc, r)
 		return
 	}
 
@@ -68,29 +76,53 @@ func (b *Balancer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if site == nil {
 		// 未匹配到站点：视为管理入口，直接渲染面板
 		if !b.isAdminAllowed(r) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			http.Error(nc, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(adminHTML))
+		nc.Header().Set("Content-Type", "text/html; charset=utf-8")
+		nc.Write([]byte(adminHTML))
 		return
 	}
 
 	up := site.Pick()
 	if up == nil {
-		http.Error(w, "no healthy upstream available", http.StatusServiceUnavailable)
+		http.Error(nc, "no healthy upstream available", http.StatusServiceUnavailable)
 		return
 	}
 	proxy := site.Proxy(up.Name)
 	if proxy == nil {
-		http.Error(w, "upstream proxy not found", http.StatusInternalServerError)
+		http.Error(nc, "upstream proxy not found", http.StatusInternalServerError)
 		return
 	}
 	up.Enter()
 	up.AddRequest()
 	b.logRequest(r, site.Domain, up.Name)
 	defer up.Leave()
-	proxy.ServeHTTP(w, r)
+	proxy.ServeHTTP(nc, r)
+}
+
+// noCacheWriter 强制响应带 no-store，阻止 nginx/CF 等中间层缓存动态内容
+type noCacheWriter struct {
+	http.ResponseWriter
+}
+
+func (w *noCacheWriter) WriteHeader(code int) {
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *noCacheWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *noCacheWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, fmt.Errorf("hijack not supported")
 }
 
 // logRequest 记录最近一条转发记录（环形缓冲）
