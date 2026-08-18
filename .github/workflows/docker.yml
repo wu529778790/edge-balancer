@@ -85,8 +85,11 @@ jobs:
             sudo docker pull "$IMAGE"
             sudo docker rm -f "$CONTAINER" || true
 
+            # host 网络：直接监听宿主机 6705（nginx 已反代 127.0.0.1:6705），
+            # 无需 -p 端口映射，外部无法直连，仅限本机反代访问
             sudo docker run -d \
               --name "$CONTAINER" \
+              --network host \
               --restart unless-stopped \
               --memory=256m \
               --memory-swap=384m \
@@ -94,7 +97,6 @@ jobs:
               --log-opt max-size=10m \
               --log-opt max-file=3 \
               -v "$CONFIG_FILE:/app/config.yaml:ro" \
-              -p 6705:8080 \
               "$IMAGE"
 
             sudo docker image prune -f
