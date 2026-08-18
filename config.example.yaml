@@ -1,0 +1,17 @@
+# edge-balancer 配置示例
+# 复制本文件为 config.yaml（已 gitignore），填入你的真实上游地址
+
+listen: ":8080"               # 监听地址
+health_interval: 10           # 健康检查间隔（秒）
+health_timeout: 5             # 健康检查超时（秒）
+health_path: "/api/health"    # 默认健康检查路径
+
+# 上游列表：按 weight 加权分流，挂了自动剔除，恢复自动加入
+upstreams:
+  - name: "cf-worker-a"       # 唯一名称
+    url: "https://xxx.workers.dev"
+    weight: 50                # 权重 50
+  - name: "vercel"
+    url: "https://your-app.vercel.app"
+    weight: 50                # 权重 50，与上面 50:50 分流
+    # health: "/api/health"   # 可选：覆盖全局 health_path
