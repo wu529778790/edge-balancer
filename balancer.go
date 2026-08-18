@@ -338,12 +338,15 @@ function loadConfig(){
       html+='<div class="card"><div class="site-head"><strong>'+esc(s.domain)+'</strong><span>'+
         '<label style="font-size:12px;color:#57606a"><input type="checkbox" '+(s.enabled?'checked':'')+' onchange="toggleSite('+s.id+',this.checked)"> 启用</label> '+
         '<button class="btn btn-d" onclick="delSite('+s.id+')">删除</button></span></div>'+
-        '<table><thead><tr><th>上游</th><th>地址</th><th>host</th><th>权重</th><th>优先级</th><th>健康路径</th><th></th></tr></thead><tbody>';
+        '<table><thead><tr><th>上游</th><th>地址</th><th>host</th><th>权重</th><th>优先级</th><th>健康路径</th><th>启用</th><th></th></tr></thead><tbody>';
       s.upstreams.forEach(function(u){
-        html+='<tr><td>'+esc(u.name)+'</td><td class="code">'+esc(u.url)+'</td><td class="code">'+esc(u.host||'-')+'</td><td>'+u.weight+'</td><td>'+u.priority+'</td><td>'+esc(u.health||'-')+'</td>'+
+        var rowCls = u.enabled ? '' : ' style="opacity:0.55"';
+        var statusLbl = u.enabled ? '已启用' : '已停用';
+        html+='<tr'+rowCls+'><td>'+esc(u.name)+'</td><td class="code">'+esc(u.url)+'</td><td class="code">'+esc(u.host||'-')+'</td><td>'+u.weight+'</td><td>'+u.priority+'</td><td>'+esc(u.health||'-')+'</td>'+
+          '<td><label style="font-size:12px"><input type="checkbox" '+(u.enabled?'checked':'')+' onchange="toggleUp('+u.id+',this.checked)"> '+statusLbl+'</label></td>'+
           '<td><button class="btn" onclick="editUpForm('+u.id+','+s.id+')">编辑</button> '+
           '<button class="btn btn-d" onclick="delUp('+u.id+')">删除</button></td></tr>';
-        html+='<tr class="hidden" id="upedit-'+u.id+'"><td colspan="7"><div class="frm"><div class="row" style="align-items:flex-end">'+
+        html+='<tr class="hidden" id="upedit-'+u.id+'"><td colspan="8"><div class="frm"><div class="row" style="align-items:flex-end">'+
           '<div><label>name</label><input id="ue-'+u.id+'-name" value="'+esc(u.name)+'" size="10"></div>'+
           '<div><label>url</label><input id="ue-'+u.id+'-url" value="'+esc(u.url)+'" size="30"></div>'+
           '<div><label>host</label><input id="ue-'+u.id+'-host" value="'+esc(u.host||'')+'" size="22" placeholder="CF Worker 填 workers.dev 域名"></div>'+
@@ -398,6 +401,7 @@ function createSite(){
   })}).then(function(){document.getElementById('ns-domain').value='';loadConfig()});
 }
 function toggleSite(id,on){api('/admin/api/sites/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:on})}).then(loadConfig)}
+function toggleUp(id,on){api('/admin/api/upstreams/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:on})}).then(loadConfig)}
 function delSite(id){var s=gSites.find(function(x){return x.id===id});if(!s)return;if(!confirm('删除站点 '+s.domain+' 及其全部上游？'))return;api('/admin/api/sites/'+id,{method:'DELETE'}).then(loadConfig)}
 function addUp(sid){
   api('/admin/api/sites/'+sid+'/upstreams',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
