@@ -15,43 +15,55 @@ func main() {
 	configPath := flag.String("config", "config.yaml", "配置文件路径")
 	flag.Parse()
 
-	cfg, err := LoadConfig(*configPath)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 数据库模式优先：配置了 EDGE_DB_URL / EDGE_DB_TOKEN 时从 Turso 读取配置并支持热加载
+	store, _ := OpenStore()
+	var cfg *Config
+	var err error
+	if store != nil {
+		log.Println("配置模式：数据库（Turso），支持页面配置 + 热加载")
+		cfg, err = store.LoadConfig()
+	} else {
+		log.Println("配置模式：本地文件（未检测到 EDGE_DB_URL）")
+		cfg, err = LoadConfig(*configPath)
+	}
 	if err != nil {
 		log.Fatalf("加载配置失败: %v", err)
 	}
 
-	// 构建运行时站点（按域名路由）
-	sites := make([]*Site, 0, len(cfg.Sites))
-	var upstreams []*Upstream
-	for _, sc := range cfg.Sites {
-		site := NewSite(sc, cfg.Strategy, cfg.HealthPath)
-		sites = append(sites, site)
-		upstreams = append(upstreams, site.Upstreams...)
+	app, err := NewApp(store, cfg, *configPath, ctx)
+	if err != nil {
+		log.Fatalf("初始化失败: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// 健康检查（覆盖所有站点的所有上游）
-	checker := NewHealthChecker(
-		upstreams,
-		time.Duration(cfg.HealthInterval)*time.Second,
-		time.Duration(cfg.HealthTimeout)*time.Second,
-		cfg.HealthPath,
-	)
-	checker.Start(ctx)
-
-	// 分流器（多站点按 Host 路由）
-	balancer := NewBalancer(sites, cfg.AdminPath, cfg.AdminToken)
+	// DB 模式：定时同步配置，页面改动自动生效（无需重启）
+	if store != nil {
+		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := app.Reload(); err != nil {
+						log.Printf("配置重载失败: %v", err)
+					}
+				}
+			}
+		}()
+	}
 
 	server := &http.Server{
 		Addr:    cfg.Listen,
-		Handler: balancer,
+		Handler: app,
 	}
 
 	go func() {
-		log.Printf("edge-balancer 启动，监听 %s，站点 %d 个", cfg.Listen, len(sites))
-		for _, s := range sites {
+		log.Printf("edge-balancer 启动，监听 %s，站点 %d 个", cfg.Listen, len(cfg.Sites))
+		for _, s := range cfg.Sites {
 			log.Printf("  站点: %-32s 策略 %-10s 上游 %d 个", s.Domain, s.Strategy, len(s.Upstreams))
 			for _, u := range s.Upstreams {
 				log.Printf("    上游: %-16s -> %s（权重 %d）", u.Name, u.URL, u.Weight)

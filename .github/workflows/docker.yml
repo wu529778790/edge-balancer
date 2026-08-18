@@ -82,6 +82,15 @@ jobs:
               exit 1
             fi
 
+            # 数据库连接（v3）：从服务器本地 .env 读取（EDGE_DB_URL/EDGE_DB_TOKEN/EDGE_LISTEN），
+            # 敏感信息不进 GitHub；没有 .env 时回退文件配置模式
+            ENV_FILE="/opt/edge-balancer/.env"
+            ENV_ARGS=""
+            if [ -f "$ENV_FILE" ]; then
+              ENV_ARGS="--env-file $ENV_FILE"
+              echo "检测到 .env，启用数据库配置模式"
+            fi
+
             sudo docker pull "$IMAGE"
             sudo docker rm -f "$CONTAINER" || true
 
@@ -90,6 +99,7 @@ jobs:
             sudo docker run -d \
               --name "$CONTAINER" \
               --network host \
+              $ENV_ARGS \
               --restart unless-stopped \
               --memory=256m \
               --memory-swap=384m \

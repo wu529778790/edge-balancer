@@ -106,7 +106,7 @@ func (s *Store) ListSites() ([]SiteRecord, error) {
 	}
 	defer rows.Close()
 
-	var sites []SiteRecord
+	var sites = make([]SiteRecord, 0)
 	for rows.Next() {
 		var st SiteRecord
 		var enabled int

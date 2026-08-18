@@ -79,6 +79,22 @@ sites:
 
 配置了 `admin_token` 后，访问面板需携带 `?token=<token>`。
 
+## 配置管理（v3，数据库模式）
+
+设置环境变量后，配置从 Turso(libSQL) 数据库读取，**页面改配置 5 秒内自动生效，无需重启**：
+
+```bash
+# 容器环境变量（敏感信息放服务器本地 .env，不进镜像）
+EDGE_DB_URL=libsql://your-db.turso.io
+EDGE_DB_TOKEN=your-token
+EDGE_LISTEN=:6705              # 监听地址
+```
+
+- **管理页面**：`/admin` → 「配置管理」标签页，可增删改站点/上游（名称、URL、host、权重、优先级、启用开关）、改全局设置，保存即写库并热加载
+- **REST API**：`/admin/api/sites`、`/admin/api/sites/{id}/upstreams`、`/admin/api/settings`（增删改查，带 admin_token 鉴权）
+- **热加载**：运行时常驻 5 秒轮询数据库，配置变更自动重建分流器与健康检查（原子切换，无感知）
+- 未设置 `EDGE_DB_URL` 时回退到本地 `config.yaml` 文件模式（向后兼容）
+
 ## 工作原理
 
 ```
@@ -97,7 +113,7 @@ sites:
 - [x] v1：加权分流 + 健康检查 + 自动剔除
 - [x] v2：状态面板（上游健康/统计/最近请求分发记录，`/admin`）
 - [x] v2.5：多域名路由（按 Host 头分发到各站点上游组）+ 管理入口
-- [ ] v3：Web 界面增删站点/上游、拖权重（动态配置热加载，不重启）
+- [x] v3：配置入库（Turso/libSQL）+ 管理页面 CRUD + 热加载（改配置即生效，不重启）
 
 ## License
 
