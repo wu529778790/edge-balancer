@@ -20,6 +20,10 @@ func main() {
 	configPath := flag.String("config", "config.yaml", "配置文件路径")
 	flag.Parse()
 
+	// 统一使用东八区（Asia/Shanghai，无夏令时）。服务器容器默认 UTC，
+	// 用固定偏移不依赖 tzdata，保证日志 / 面板时间 / CF 配额"今天"都按北京时间为准
+	time.Local = time.FixedZone("Asia/Shanghai", 8*3600)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
