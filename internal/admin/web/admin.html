@@ -472,6 +472,12 @@ function openSiteModal(id){
 
 function openUpModal(sid,uid){
   var up=uid==null?null:gSites.find(function(x){return x.id===sid}).upstreams.find(function(x){return x.id===uid});
+  // CF 账号改为下拉：选项来自已配置的账号列表（gCF）；编辑时若当前值不在列表则补一项避免丢失
+  var cfOpts=[{v:'',l:'无（不关联配额账号）'}];
+  gCF.forEach(function(a){cfOpts.push({v:a.name,l:a.name})});
+  if(up&&up.cf_account&&!gCF.some(function(a){return a.name===up.cf_account})){
+    cfOpts.push({v:up.cf_account,l:up.cf_account+'（未配置）'});
+  }
   openModal(up?'编辑上游':'新增上游',[
     {key:'name',label:'名称',placeholder:'cf-worker'},
     {key:'url',label:'URL',placeholder:'https://xxx.workers.dev/'},
@@ -479,7 +485,7 @@ function openUpModal(sid,uid){
     {key:'weight',label:'权重',type:'number'},
     {key:'priority',label:'优先级',type:'number'},
     {key:'health',label:'健康路径（可选）',placeholder:'/api/health'},
-    {key:'cf_account',label:'CF 账号（配额账号名）',placeholder:'可选'},
+    {key:'cf_account',label:'CF 账号（配额监控）',type:'select',options:cfOpts},
     {key:'enabled',label:'启用',type:'check'}
   ],up,function(){
     var body={name:mval('name'),url:mval('url'),host:mval('host'),weight:+mval('weight')||1,priority:+mval('priority')||0,health:mval('health'),cf_account:mval('cf_account')};
