@@ -32,6 +32,10 @@ func NewSite(cfg SiteConfig, defaultStrategy, defaultHealthPath string) *Site {
 		s.HealthPath = defaultHealthPath
 	}
 	for _, uc := range cfg.Upstreams {
+		enabled := true
+		if uc.Enabled != nil {
+			enabled = *uc.Enabled
+		}
 		u := &Upstream{
 			Name:       uc.Name,
 			URL:        uc.URL,
@@ -39,6 +43,7 @@ func NewSite(cfg SiteConfig, defaultStrategy, defaultHealthPath string) *Site {
 			Priority:   uc.Priority,
 			Health:     uc.Health,
 			Site:       cfg.Domain,
+			Enabled:    enabled,
 			healthPath: uc.Health,
 		}
 		if u.healthPath == "" {
@@ -66,12 +71,13 @@ func NewSite(cfg SiteConfig, defaultStrategy, defaultHealthPath string) *Site {
 func (s *Site) Proxy(name string) *httputil.ReverseProxy { return s.proxies[name] }
 
 // Pick 选择上游：先按优先级取最高优先级的健康组，组内再按策略选
+// 已停用（enabled=false）的上游不参与分流，但仍展示在状态面板中
 func (s *Site) Pick() *Upstream {
 	// 找最高优先级（数值最小）的健康组
 	bestPriority := int(^uint(0) >> 1)
 	var group []*Upstream
 	for _, u := range s.Upstreams {
-		if !u.IsHealthy() {
+		if !u.Enabled || !u.IsHealthy() {
 			continue
 		}
 		if u.Priority < bestPriority {

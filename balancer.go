@@ -169,6 +169,7 @@ type adminUpstream struct {
 	Name     string `json:"name"`
 	URL      string `json:"url"`
 	Healthy  bool   `json:"healthy"`
+	Enabled  bool   `json:"enabled"`
 	Weight   int    `json:"weight"`
 	Priority int    `json:"priority"`
 	InFlight int64  `json:"inFlight"`
@@ -205,6 +206,7 @@ func (b *Balancer) serveAdminAPI(w http.ResponseWriter) {
 				Name:     u.Name,
 				URL:      u.URL,
 				Healthy:  u.IsHealthy(),
+				Enabled:  u.Enabled,
 				Weight:   u.Weight,
 				Priority: u.Priority,
 				InFlight: u.InFlight(),
@@ -236,7 +238,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}
 th{text-align:left;color:#656d76;font-weight:500;padding:6px 8px;border-bottom:1px solid #e4e6eb}
 td{padding:7px 8px;border-bottom:1px solid #f0f1f3;vertical-align:top}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
-.ok{background:#1a7f37}.bad{background:#cf222e}
+.ok{background:#1a7f37}.bad{background:#cf222e}.off{background:#888780}
 .code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:#57606a}
 .log{font-size:12px;color:#57606a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:2px 0}
 input,select{font-size:12px;padding:5px 8px;border:1px solid #d4d7dd;border-radius:6px;background:#fff;color:#1f2328;margin:2px}
@@ -312,8 +314,10 @@ function loadStatus(){
     d.sites.forEach(function(s){
       html+='<div class="card"><h2>'+esc(s.domain)+' <span class="tag">策略 '+esc(s.strategy)+'</span></h2><table><thead><tr><th>上游</th><th>地址</th><th>健康</th><th>权重</th><th>优先级</th><th>在途</th><th>累计转发</th></tr></thead><tbody>';
       s.upstreams.forEach(function(x){
+        var st = x.enabled ? (x.healthy ? '健康' : '不健康') : '已停用';
+        var cls = x.enabled ? (x.healthy ? 'ok' : 'bad') : 'off';
         html+='<tr><td>'+esc(x.name)+'</td><td class="code">'+esc(x.url)+'</td>'+
-          '<td><span class="dot '+(x.healthy?'ok':'bad')+'"></span>'+(x.healthy?'健康':'不健康')+'</td>'+
+          '<td><span class="dot '+cls+'"></span>'+st+'</td>'+
           '<td>'+x.weight+'</td><td>'+x.priority+'</td><td>'+x.inFlight+'</td><td>'+x.total+'</td></tr>';
       });
       html+='</tbody></table></div>';

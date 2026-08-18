@@ -18,6 +18,7 @@ type Upstream struct {
 	Priority int
 	Health   string // 健康检查路径（空则用全局默认）
 	Site     string // 所属站点域名
+	Enabled  bool   // 是否参与分流（false 仅展示，不转发）
 
 	healthy       atomic.Bool
 	inFlight      atomic.Int64

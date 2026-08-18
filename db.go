@@ -199,16 +199,19 @@ func (s *Store) LoadConfig() (*Config, error) {
 		}
 		sc := SiteConfig{Domain: st.Domain, Strategy: st.Strategy, HealthPath: st.HealthPath}
 		for _, u := range st.Upstreams {
-			if !u.Enabled {
-				continue
-			}
+			enabled := u.Enabled
 			sc.Upstreams = append(sc.Upstreams, UpstreamConfig{
-				Name: u.Name, URL: u.URL, Host: u.Host,
-				Weight: u.Weight, Priority: u.Priority, Health: u.Health,
+				Name:     u.Name,
+				URL:      u.URL,
+				Host:     u.Host,
+				Weight:   u.Weight,
+				Priority: u.Priority,
+				Health:   u.Health,
+				Enabled:  &enabled,
 			})
 		}
 		if len(sc.Upstreams) == 0 {
-			continue // 没有启用上游的站点跳过
+			continue // 没有上游的站点跳过
 		}
 		cfg.Sites = append(cfg.Sites, sc)
 	}

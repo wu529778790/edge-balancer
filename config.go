@@ -15,6 +15,7 @@ type UpstreamConfig struct {
 	Weight   int    `yaml:"weight"`   // 分流权重（灰度比例）
 	Priority int    `yaml:"priority"` // 优先级，越小越优先；0 表示默认同一优先级（纯权重分流）
 	Health   string `yaml:"health"`   // 可选：该上游的健康检查路径，覆盖全局 health_path
+	Enabled  *bool  `yaml:"enabled"`  // 可选：是否参与分流；nil 视为 true（兼容旧配置），false 则展示但不转发
 }
 
 // SiteConfig 单个站点（域名）的配置：按 Host 头路由，每个域名独立一套上游
