@@ -4,7 +4,7 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o edge-balancer .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o edge-balancer ./cmd/edge-balancer
 
 # 运行阶段
 FROM alpine:3.20

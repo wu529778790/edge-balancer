@@ -1,4 +1,8 @@
-package main
+// Package config 配置模型与校验（单一真源）。
+//
+// 文件模式（config.yaml）与数据库模式（Turso）最终都构建出本包的 Config，
+// 默认值（Normalize）与结构校验（Validate）只在这里实现一次。
+package config
 
 import (
 	"fmt"
@@ -39,19 +43,17 @@ type Config struct {
 	Sites          []SiteConfig `yaml:"sites"`           // 站点列表（按域名路由）
 }
 
-// LoadConfig 加载并校验配置文件
-func LoadConfig(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("读取配置: %w", err)
-	}
+// CFAccount Cloudflare 账号配额配置（settings.cf_accounts 的 JSON 载体）
+type CFAccount struct {
+	Name      string `json:"name"`
+	Token     string `json:"token"`
+	AccountID string `json:"account_id"`
+	Quota     int64  `json:"quota"`     // 每月免费额度（请求数），默认 100000
+	Threshold int    `json:"threshold"` // 使用率阈值 %，默认 90
+}
 
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("解析配置: %w", err)
-	}
-
-	// 默认值
+// Normalize 填充默认值。文件模式与数据库模式共用。
+func Normalize(cfg *Config) {
 	if cfg.Listen == "" {
 		cfg.Listen = ":8080"
 	}
@@ -70,34 +72,58 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.AdminPath == "" {
 		cfg.AdminPath = "/admin"
 	}
-
-	// 校验站点
-	if len(cfg.Sites) == 0 {
-		return nil, fmt.Errorf("至少配置一个 site（域名）")
-	}
-	seen := make(map[string]bool)
 	for i := range cfg.Sites {
 		site := &cfg.Sites[i]
-		if site.Domain == "" {
-			return nil, fmt.Errorf("site[%d] 缺少 domain", i)
-		}
-		if seen[site.Domain] {
-			return nil, fmt.Errorf("site 域名重复: %s", site.Domain)
-		}
-		seen[site.Domain] = true
-
-		if len(site.Upstreams) == 0 {
-			return nil, fmt.Errorf("site %s 至少配置一个 upstream", site.Domain)
-		}
 		for j := range site.Upstreams {
 			up := &site.Upstreams[j]
 			if up.Weight <= 0 {
 				up.Weight = 1
 			}
+		}
+	}
+}
+
+// Validate 结构完整性校验（不含"至少一个站点"——数据库模式允许空配置起步）。
+func Validate(cfg *Config) error {
+	seen := make(map[string]bool)
+	for i := range cfg.Sites {
+		site := &cfg.Sites[i]
+		if site.Domain == "" {
+			return fmt.Errorf("site[%d] 缺少 domain", i)
+		}
+		if seen[site.Domain] {
+			return fmt.Errorf("site 域名重复: %s", site.Domain)
+		}
+		seen[site.Domain] = true
+		for j := range site.Upstreams {
+			up := &site.Upstreams[j]
 			if up.Name == "" {
-				return nil, fmt.Errorf("site %s 的 upstream[%d] 缺少 name", site.Domain, j)
+				return fmt.Errorf("site %s 的 upstream[%d] 缺少 name", site.Domain, j)
 			}
 		}
+	}
+	return nil
+}
+
+// LoadConfig 加载并校验配置文件（文件模式）。
+// 与数据库模式不同，文件模式要求至少一个站点。
+func LoadConfig(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("读取配置: %w", err)
+	}
+
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("解析配置: %w", err)
+	}
+
+	Normalize(&cfg)
+	if err := Validate(&cfg); err != nil {
+		return nil, err
+	}
+	if len(cfg.Sites) == 0 {
+		return nil, fmt.Errorf("至少配置一个 site（域名）")
 	}
 	return &cfg, nil
 }

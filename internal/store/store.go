@@ -1,4 +1,9 @@
-package main
+// Package store Turso(libSQL) 配置存储。
+//
+// 职责：连接、迁移、站点/上游/设置/CF 账号的 CRUD，以及从数据库构建运行配置。
+// 从数据库构建的配置只做默认值归一（config.Normalize），不做严格校验
+// （数据库模式允许空配置起步，且历史数据可能宽松——保持与文件模式不同的语义）。
+package store
 
 import (
 	"database/sql"
@@ -9,6 +14,8 @@ import (
 	"strings"
 
 	_ "github.com/tursodatabase/libsql-client-go/libsql"
+
+	"github.com/wu529778790/edge-balancer/internal/config"
 )
 
 // Store Turso(libSQL) 配置存储
@@ -113,7 +120,7 @@ func (s *Store) columnExists(table, column string) (bool, error) {
 	return false, rows.Err()
 }
 
-// SiteRecord 站点及上游的数据库记录
+// SiteRecord 站点及上游的数据库记录（供管理 API 序列化）
 type SiteRecord struct {
 	ID         int64            `json:"id"`
 	Domain     string           `json:"domain"`
@@ -135,15 +142,6 @@ type UpstreamRecord struct {
 	Health    string `json:"health"`
 	CFAccount string `json:"cf_account"`
 	Enabled   bool   `json:"enabled"`
-}
-
-// CFAccount Cloudflare 账号配额配置
-type CFAccount struct {
-	Name      string `json:"name"`
-	Token     string `json:"token"`
-	AccountID string `json:"account_id"`
-	Quota     int64  `json:"quota"`     // 每月免费额度（请求数），默认 100000
-	Threshold int    `json:"threshold"` // 使用率阈值 %，默认 90
 }
 
 // ListSites 读取全部站点（含启用/停用的上游）
@@ -198,18 +196,12 @@ func (s *Store) listUpstreams(siteID int64) ([]UpstreamRecord, error) {
 	return ups, rows.Err()
 }
 
-// LoadConfig 从数据库构建运行时配置（仅启用项）
-func (s *Store) LoadConfig() (*Config, error) {
-	cfg := &Config{
-		Listen:         os.Getenv("EDGE_LISTEN"),
-		HealthInterval: 10,
-		HealthTimeout:  5,
-		HealthPath:     "/api/health",
-		Strategy:       "weighted",
-		AdminPath:      "/admin",
-	}
-	if cfg.Listen == "" {
-		cfg.Listen = ":8080"
+// LoadConfig 从数据库构建运行时配置（仅启用项）。
+// 只做默认值归一（config.Normalize），不做严格校验：允许空配置起步，
+// 且无上游的站点跳过（不进入运行时）。
+func (s *Store) LoadConfig() (*config.Config, error) {
+	cfg := &config.Config{
+		Listen: os.Getenv("EDGE_LISTEN"),
 	}
 
 	settings, err := s.GetSettings()
@@ -245,10 +237,10 @@ func (s *Store) LoadConfig() (*Config, error) {
 		if !st.Enabled {
 			continue
 		}
-		sc := SiteConfig{Domain: st.Domain, Strategy: st.Strategy, HealthPath: st.HealthPath}
+		sc := config.SiteConfig{Domain: st.Domain, Strategy: st.Strategy, HealthPath: st.HealthPath}
 		for _, u := range st.Upstreams {
 			enabled := u.Enabled
-			sc.Upstreams = append(sc.Upstreams, UpstreamConfig{
+			sc.Upstreams = append(sc.Upstreams, config.UpstreamConfig{
 				Name:      u.Name,
 				URL:       u.URL,
 				Host:      u.Host,
@@ -264,6 +256,8 @@ func (s *Store) LoadConfig() (*Config, error) {
 		}
 		cfg.Sites = append(cfg.Sites, sc)
 	}
+
+	config.Normalize(cfg)
 	return cfg, nil
 }
 
@@ -346,7 +340,7 @@ func (s *Store) DeleteUpstream(id int64) error {
 }
 
 // SetCFAccounts 保存 Cloudflare 账号列表（settings.cf_accounts，JSON）
-func (s *Store) SetCFAccounts(accounts []CFAccount) error {
+func (s *Store) SetCFAccounts(accounts []config.CFAccount) error {
 	data, err := json.Marshal(accounts)
 	if err != nil {
 		return err
@@ -355,16 +349,16 @@ func (s *Store) SetCFAccounts(accounts []CFAccount) error {
 }
 
 // GetCFAccounts 读取 Cloudflare 账号列表
-func (s *Store) GetCFAccounts() ([]CFAccount, error) {
+func (s *Store) GetCFAccounts() ([]config.CFAccount, error) {
 	settings, err := s.GetSettings()
 	if err != nil {
 		return nil, err
 	}
 	raw := settings["cf_accounts"]
 	if raw == "" {
-		return []CFAccount{}, nil
+		return []config.CFAccount{}, nil
 	}
-	var accounts []CFAccount
+	var accounts []config.CFAccount
 	if err := json.Unmarshal([]byte(raw), &accounts); err != nil {
 		return nil, err
 	}

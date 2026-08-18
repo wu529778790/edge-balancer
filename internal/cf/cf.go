@@ -1,4 +1,5 @@
-package main
+// Package cf Cloudflare Workers 用量查询（GraphQL Analytics API）。
+package cf
 
 import (
 	"bytes"
@@ -7,10 +8,12 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/wu529778790/edge-balancer/internal/config"
 )
 
-// CFUsage 单个 Cloudflare 账号的用量
-type CFUsage struct {
+// Usage 单个 Cloudflare 账号的用量
+type Usage struct {
 	Name      string  `json:"name"`
 	Used      int64   `json:"used"`
 	Quota     int64   `json:"quota"`
@@ -20,10 +23,10 @@ type CFUsage struct {
 	Error     string  `json:"error,omitempty"`
 }
 
-// QueryCFUsage 查询单个账号当天 Workers 请求数（GraphQL Analytics API）
+// QueryUsage 查询单个账号当天 Workers 请求数（GraphQL Analytics API）
 // 免费版限额 100,000 请求/天（非每月）；查 date_geq/date_leq = 今天
 // 注意：字段名为 workersInvocationsAdaptive（无 Groups 后缀，文档有误）
-func QueryCFUsage(acc CFAccount) (CFUsage, error) {
+func QueryUsage(acc config.CFAccount) (Usage, error) {
 	quota := acc.Quota
 	if quota <= 0 {
 		quota = 100000
@@ -43,7 +46,7 @@ func QueryCFUsage(acc CFAccount) (CFUsage, error) {
 	payload, _ := json.Marshal(map[string]string{"query": query})
 	req, err := http.NewRequest(http.MethodPost, "https://api.cloudflare.com/client/v4/graphql", bytes.NewReader(payload))
 	if err != nil {
-		return CFUsage{}, err
+		return Usage{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+acc.Token)
 	req.Header.Set("Content-Type", "application/json")
@@ -51,12 +54,12 @@ func QueryCFUsage(acc CFAccount) (CFUsage, error) {
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return CFUsage{}, err
+		return Usage{}, err
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return CFUsage{}, err
+		return Usage{}, err
 	}
 
 	var parsed struct {
@@ -76,10 +79,10 @@ func QueryCFUsage(acc CFAccount) (CFUsage, error) {
 		} `json:"errors"`
 	}
 	if err := json.Unmarshal(data, &parsed); err != nil {
-		return CFUsage{}, fmt.Errorf("解析 CF 响应失败: %w", err)
+		return Usage{}, fmt.Errorf("解析 CF 响应失败: %w", err)
 	}
 	if len(parsed.Errors) > 0 {
-		return CFUsage{}, fmt.Errorf("CF API: %s", parsed.Errors[0].Message)
+		return Usage{}, fmt.Errorf("CF API: %s", parsed.Errors[0].Message)
 	}
 
 	used := int64(0)
@@ -87,7 +90,7 @@ func QueryCFUsage(acc CFAccount) (CFUsage, error) {
 		used = parsed.Data.Viewer.Accounts[0].WorkersInvocations[0].Sum.Requests
 	}
 	percent := float64(used) / float64(quota) * 100
-	return CFUsage{
+	return Usage{
 		Name:      acc.Name,
 		Used:      used,
 		Quota:     quota,
@@ -96,16 +99,16 @@ func QueryCFUsage(acc CFAccount) (CFUsage, error) {
 	}, nil
 }
 
-// QueryAllCFUsages 并发查询所有账号用量
-func QueryAllCFUsages(accounts []CFAccount) []CFUsage {
-	usages := make([]CFUsage, len(accounts))
+// QueryAllUsages 并发查询所有账号用量
+func QueryAllUsages(accounts []config.CFAccount) []Usage {
+	usages := make([]Usage, len(accounts))
 	done := make(chan struct{}, len(accounts))
 	for i, acc := range accounts {
-		go func(i int, acc CFAccount) {
+		go func(i int, acc config.CFAccount) {
 			defer func() { done <- struct{}{} }()
-			u, err := QueryCFUsage(acc)
+			u, err := QueryUsage(acc)
 			if err != nil {
-				u = CFUsage{Name: acc.Name, Error: err.Error()}
+				u = Usage{Name: acc.Name, Error: err.Error()}
 			}
 			usages[i] = u
 		}(i, acc)

@@ -24,7 +24,7 @@ cp config.example.yaml config.yaml
 # 编辑 config.yaml，填入你的站点（域名）和上游地址
 
 # 2. 本地运行
-go run . -config config.yaml
+go run ./cmd/edge-balancer -config config.yaml
 
 # 3. 或 Docker 运行
 docker build -t edge-balancer .
@@ -94,6 +94,21 @@ EDGE_LISTEN=:6705              # 监听地址
 - **REST API**：`/admin/api/sites`、`/admin/api/sites/{id}/upstreams`、`/admin/api/settings`（增删改查，带 admin_token 鉴权）
 - **热加载**：运行时常驻 5 秒轮询数据库，配置变更自动重建分流器与健康检查（原子切换，无感知）
 - 未设置 `EDGE_DB_URL` 时回退到本地 `config.yaml` 文件模式（向后兼容）
+
+## 代码结构
+
+```
+cmd/edge-balancer/main.go    # 入口：启动、定时器、优雅退出
+internal/server/             # 组装层：热加载（原子重建分流器）+ 顶层路由
+internal/config/             # 配置模型 + 默认值 + 校验（单一真源）
+internal/store/              # Turso(libSQL) 存储与迁移
+internal/dataplane/          # 数据平面：转发器 / 站点选路 / 健康检查
+internal/admin/              # 控制平面：面板 HTML + 配置 CRUD + CF 配额
+internal/admin/web/          # 管理面板前端（go:embed 进二进制，改页面即生效）
+internal/cf/                 # Cloudflare 用量查询
+```
+
+数据平面不依赖控制平面与存储；控制平面通过依赖注入（回调）触发热加载，无反向依赖。
 
 ## 工作原理
 

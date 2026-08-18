@@ -1,5 +1,5 @@
-# 二进制
-edge-balancer
+# 二进制（仅根目录编译产物，勿匹配 cmd/edge-balancer 目录）
+/edge-balancer
 *.exe
 
 # 真实配置（含上游地址，勿提交）

@@ -1,4 +1,4 @@
-package main
+package dataplane
 
 import (
 	"context"
@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+
+	"github.com/wu529778790/edge-balancer/internal/config"
 )
 
 // Site 运行时的站点：按 Host 头（域名）路由到一组上游
@@ -21,7 +23,7 @@ type Site struct {
 }
 
 // NewSite 由静态配置构建运行时站点，并预建每个上游的反向代理
-func NewSite(cfg SiteConfig, defaultStrategy, defaultHealthPath string) *Site {
+func NewSite(cfg config.SiteConfig, defaultStrategy, defaultHealthPath string) *Site {
 	s := &Site{
 		Domain:     cfg.Domain,
 		Strategy:   cfg.Strategy,

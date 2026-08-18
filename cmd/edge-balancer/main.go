@@ -1,3 +1,4 @@
+// edge-balancer 入口：按 Host 头路由的多站点流量分发器 + 管理面板。
 package main
 
 import (
@@ -9,6 +10,10 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/wu529778790/edge-balancer/internal/config"
+	"github.com/wu529778790/edge-balancer/internal/server"
+	"github.com/wu529778790/edge-balancer/internal/store"
 )
 
 func main() {
@@ -19,27 +24,27 @@ func main() {
 	defer cancel()
 
 	// 数据库模式优先：配置了 EDGE_DB_URL / EDGE_DB_TOKEN 时从 Turso 读取配置并支持热加载
-	store, _ := OpenStore()
-	var cfg *Config
+	st, _ := store.OpenStore()
+	var cfg *config.Config
 	var err error
-	if store != nil {
+	if st != nil {
 		log.Println("配置模式：数据库（Turso），支持页面配置 + 热加载")
-		cfg, err = store.LoadConfig()
+		cfg, err = st.LoadConfig()
 	} else {
 		log.Println("配置模式：本地文件（未检测到 EDGE_DB_URL）")
-		cfg, err = LoadConfig(*configPath)
+		cfg, err = config.LoadConfig(*configPath)
 	}
 	if err != nil {
 		log.Fatalf("加载配置失败: %v", err)
 	}
 
-	app, err := NewApp(store, cfg, *configPath, ctx)
+	srv, err := server.New(st, cfg, *configPath, ctx)
 	if err != nil {
 		log.Fatalf("初始化失败: %v", err)
 	}
 
 	// DB 模式：定时同步配置 + 每小时检查 Cloudflare 配额（自动切换）
-	if store != nil {
+	if st != nil {
 		go func() {
 			cfgTicker := time.NewTicker(5 * time.Second)
 			defer cfgTicker.Stop()
@@ -50,11 +55,11 @@ func main() {
 				case <-ctx.Done():
 					return
 				case <-cfgTicker.C:
-					if err := app.Reload(); err != nil {
+					if err := srv.Reload(); err != nil {
 						log.Printf("配置重载失败: %v", err)
 					}
 				case <-quotaTicker.C:
-					if _, err := app.CheckCFQuotas(); err != nil {
+					if _, err := srv.CheckCFQuotas(); err != nil {
 						log.Printf("配额检查失败: %v", err)
 					}
 				}
@@ -62,9 +67,9 @@ func main() {
 		}()
 	}
 
-	server := &http.Server{
+	httpServer := &http.Server{
 		Addr:    cfg.Listen,
-		Handler: app,
+		Handler: srv,
 	}
 
 	go func() {
@@ -75,7 +80,7 @@ func main() {
 				log.Printf("    上游: %-16s -> %s（权重 %d）", u.Name, u.URL, u.Weight)
 			}
 		}
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("监听失败: %v", err)
 		}
 	}()
@@ -88,7 +93,7 @@ func main() {
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
-	if err := server.Shutdown(shutdownCtx); err != nil {
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Printf("关闭失败: %v", err)
 	}
 	log.Println("已退出")

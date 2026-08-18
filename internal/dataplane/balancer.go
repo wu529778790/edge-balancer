@@ -1,4 +1,4 @@
-package main
+package dataplane
 
 import (
 	"bufio"
@@ -21,26 +21,53 @@ type ReqEntry struct {
 	Upstream string `json:"upstream"`
 }
 
-// Balancer 多站点分流器：按 Host 头（域名）路由到对应站点的上游组，
-// 未匹配到任何站点的域名（如管理入口）直接渲染状态面板。
+// UpstreamStatus 面板用上游状态
+type UpstreamStatus struct {
+	Name     string `json:"name"`
+	URL      string `json:"url"`
+	Healthy  bool   `json:"healthy"`
+	Enabled  bool   `json:"enabled"`
+	Weight   int    `json:"weight"`
+	Priority int    `json:"priority"`
+	InFlight int64  `json:"inFlight"`
+	Total    int64  `json:"total"`
+}
+
+// SiteStatus 面板用站点状态
+type SiteStatus struct {
+	Domain    string           `json:"domain"`
+	Strategy  string           `json:"strategy"`
+	Upstreams []UpstreamStatus `json:"upstreams"`
+}
+
+// Status 面板状态快照
+type Status struct {
+	Time  string       `json:"time"`
+	Sites []SiteStatus `json:"sites"`
+	Log   []ReqEntry   `json:"log"`
+}
+
+// Balancer 多站点分流器：按 Host 头（域名）路由到对应站点的上游组。
+// 未匹配到任何站点的域名（如管理入口）转交给 unmatched（通常渲染状态面板）。
 type Balancer struct {
 	sites  []*Site
 	byHost map[string]*Site
 
-	adminToken string // 未匹配域名时渲染管理面板的访问 token（空则不鉴权）
+	unmatched http.Handler // 未匹配域名时的处理器（管理面板），需自行鉴权
 
 	logMu  sync.Mutex
 	reqLog []ReqEntry
 	maxLog int
 }
 
-// NewBalancer 构造分流器，按域名建立路由表
-func NewBalancer(sites []*Site, adminToken string) *Balancer {
+// NewBalancer 构造分流器，按域名建立路由表。
+// unmatched 处理未匹配域名的请求（管理面板入口），其内部负责 token 鉴权与渲染。
+func NewBalancer(sites []*Site, unmatched http.Handler) *Balancer {
 	b := &Balancer{
-		sites:      sites,
-		byHost:     make(map[string]*Site, len(sites)),
-		adminToken: adminToken,
-		maxLog:     200,
+		sites:     sites,
+		byHost:    make(map[string]*Site, len(sites)),
+		unmatched: unmatched,
+		maxLog:    200,
 	}
 	for _, s := range sites {
 		b.byHost[strings.ToLower(s.Domain)] = s
@@ -66,13 +93,8 @@ func (b *Balancer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	site := b.matchSite(r.Host)
 	if site == nil {
-		// 未匹配到站点：视为管理入口，直接渲染面板
-		if !b.isAdminAllowed(r) {
-			http.Error(nc, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		nc.Header().Set("Content-Type", "text/html; charset=utf-8")
-		nc.Write(adminHTML)
+		// 未匹配到站点：视为管理入口，转交面板处理器（内部负责鉴权与渲染）
+		b.unmatched.ServeHTTP(nc, r)
 		return
 	}
 
@@ -134,53 +156,22 @@ func (b *Balancer) logRequest(r *http.Request, siteName, upstream string) {
 	}
 }
 
-// isAdminAllowed 校验管理面板访问（token 鉴权）
-func (b *Balancer) isAdminAllowed(r *http.Request) bool {
-	if b.adminToken == "" {
-		return true
-	}
-	return r.URL.Query().Get("token") == b.adminToken
-}
-
-// adminUpstream 面板用上游状态
-type adminUpstream struct {
-	Name     string `json:"name"`
-	URL      string `json:"url"`
-	Healthy  bool   `json:"healthy"`
-	Enabled  bool   `json:"enabled"`
-	Weight   int    `json:"weight"`
-	Priority int    `json:"priority"`
-	InFlight int64  `json:"inFlight"`
-	Total    int64  `json:"total"`
-}
-
-type adminSite struct {
-	Domain    string          `json:"domain"`
-	Strategy  string          `json:"strategy"`
-	Upstreams []adminUpstream `json:"upstreams"`
-}
-
-type adminStatus struct {
-	Time     string      `json:"time"`
-	Sites    []adminSite `json:"sites"`
-	Log      []ReqEntry  `json:"log"`
-}
-
-func (b *Balancer) serveAdminAPI(w http.ResponseWriter) {
+// Status 导出状态快照（供管理面板 /admin/api 使用）
+func (b *Balancer) Status() Status {
 	b.logMu.Lock()
 	logCopy := make([]ReqEntry, len(b.reqLog))
 	copy(logCopy, b.reqLog)
 	b.logMu.Unlock()
 
-	st := adminStatus{
+	st := Status{
 		Time:  time.Now().Format("15:04:05"),
-		Sites: make([]adminSite, 0, len(b.sites)),
+		Sites: make([]SiteStatus, 0, len(b.sites)),
 		Log:   logCopy,
 	}
 	for _, s := range b.sites {
-		as := adminSite{Domain: s.Domain, Strategy: s.Strategy}
+		as := SiteStatus{Domain: s.Domain, Strategy: s.Strategy}
 		for _, u := range s.Upstreams {
-			as.Upstreams = append(as.Upstreams, adminUpstream{
+			as.Upstreams = append(as.Upstreams, UpstreamStatus{
 				Name:     u.Name,
 				URL:      u.URL,
 				Healthy:  u.IsHealthy(),
@@ -193,9 +184,13 @@ func (b *Balancer) serveAdminAPI(w http.ResponseWriter) {
 		}
 		st.Sites = append(st.Sites, as)
 	}
+	return st
+}
 
+// ServeStatusJSON 序列化状态快照（管理面板状态接口）
+func (b *Balancer) ServeStatusJSON(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	if err := json.NewEncoder(w).Encode(st); err != nil {
+	if err := json.NewEncoder(w).Encode(b.Status()); err != nil {
 		log.Printf("admin api 序列化失败: %v", err)
 	}
 }

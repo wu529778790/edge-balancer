@@ -1,117 +1,62 @@
-package main
+// Package admin 管理控制平面：面板 HTML、状态接口、配置 CRUD 与 Cloudflare 配额管理。
+//
+// 依赖注入：store（配置存储，可能为 nil = 文件模式，CRUD 返回 501）、
+// balancer（数据平面状态快照）、cfg（当前配置，供 admin_path/token 路由与鉴权）、
+// onChange（配置变更后的热加载回调，由上层注入以避免反向依赖）。
+package admin
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
-	"sync/atomic"
-	"time"
+
+	"github.com/wu529778790/edge-balancer/internal/cf"
+	"github.com/wu529778790/edge-balancer/internal/config"
+	"github.com/wu529778790/edge-balancer/internal/dataplane"
+	"github.com/wu529778790/edge-balancer/internal/store"
 )
 
-// App 应用运行时：统一入口，支持数据库配置 + 热加载（DB 模式）
-// store 为 nil 时退化为纯文件模式（无热加载、无配置 CRUD）
-type App struct {
-	store     *Store
-	cfg       *Config
-	ctx       context.Context
-	configPath string
-
-	balancer      atomic.Pointer[Balancer]
-	checkerCancel context.CancelFunc
-	adminPath     string
-	adminToken    string
+// Handler 管理面板 HTTP 处理器
+type Handler struct {
+	store    *store.Store                       // 可能为 nil（文件模式）
+	balancer func() *dataplane.Balancer         // 当前数据平面（每次 reload 后换新）
+	cfg      func() *config.Config              // 当前配置（admin_path / admin_token 可能热更新）
+	onChange func() error                       // 配置变更后热加载；nil 表示不触发
 }
 
-// NewApp 构建应用并加载初始配置
-func NewApp(store *Store, cfg *Config, configPath string, ctx context.Context) (*App, error) {
-	a := &App{store: store, cfg: cfg, configPath: configPath, ctx: ctx}
-	if err := a.reload(); err != nil {
-		return nil, err
-	}
-	return a, nil
+// New 构造管理面板处理器
+func New(st *store.Store, balancer func() *dataplane.Balancer, cfg func() *config.Config, onChange func() error) *Handler {
+	return &Handler{store: st, balancer: balancer, cfg: cfg, onChange: onChange}
 }
 
-// Reload 重新加载配置（DB 模式从数据库；文件模式从配置文件），
-// 重建分流器与健康检查并原子切换。供定时同步与管理 API 调用。
-func (a *App) Reload() error { return a.reload() }
-
-func (a *App) reload() error {
-	var cfg *Config
-	var err error
-	if a.store != nil {
-		cfg, err = a.store.LoadConfig()
-	} else {
-		cfg, err = LoadConfig(a.configPath)
-	}
-	if err != nil {
-		return err
-	}
-	a.cfg = cfg
-	a.adminPath = cfg.AdminPath
-	a.adminToken = cfg.AdminToken
-
-	sites := make([]*Site, 0, len(cfg.Sites))
-	var upstreams []*Upstream
-	for _, sc := range cfg.Sites {
-		site := NewSite(sc, cfg.Strategy, cfg.HealthPath)
-		sites = append(sites, site)
-		upstreams = append(upstreams, site.Upstreams...)
-	}
-
-	b := NewBalancer(sites, cfg.AdminToken)
-	a.balancer.Store(b)
-
-	// 重建健康检查
-	if a.checkerCancel != nil {
-		a.checkerCancel()
-	}
-	chCtx, chCancel := context.WithCancel(a.ctx)
-	a.checkerCancel = chCancel
-	checker := NewHealthChecker(
-		upstreams,
-		time.Duration(cfg.HealthInterval)*time.Second,
-		time.Duration(cfg.HealthTimeout)*time.Second,
-		cfg.HealthPath,
-	)
-	checker.Start(chCtx)
-	return nil
-}
-
-// ServeHTTP 统一入口：admin 路径走管理接口，其余按 Host 路由转发
-func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if a.adminPath != "" && (r.URL.Path == a.adminPath || strings.HasPrefix(r.URL.Path, a.adminPath+"/")) {
-		a.serveAdmin(w, r)
-		return
-	}
-	a.balancer.Load().ServeHTTP(w, r)
-}
-
-func (a *App) isAdminAllowed(r *http.Request) bool {
-	if a.adminToken == "" {
+// isAllowed 校验面板访问（admin_token 鉴权；空则不鉴权）
+func (h *Handler) isAllowed(r *http.Request, token string) bool {
+	if token == "" {
 		return true
 	}
-	return r.URL.Query().Get("token") == a.adminToken
+	return r.URL.Query().Get("token") == token
 }
 
-// serveAdmin 管理入口：HTML 面板 / 状态 JSON / 配置 CRUD
-func (a *App) serveAdmin(w http.ResponseWriter, r *http.Request) {
-	if !a.isAdminAllowed(r) {
+// ServeHTTP 管理入口：HTML 面板 / 状态 JSON / 配置 CRUD。
+// 同时承担数据平面「未匹配域名 → 渲染面板」的转交职责（任意非 API 路径都渲染 HTML）。
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	cfg := h.cfg()
+	if !h.isAllowed(r, cfg.AdminToken) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	// 状态接口：GET /admin/api
-	if r.URL.Path == a.adminPath+"/api" && r.Method == http.MethodGet {
-		a.balancer.Load().serveAdminAPI(w)
+	// 状态接口：GET {admin_path}/api
+	if r.URL.Path == cfg.AdminPath+"/api" && r.Method == http.MethodGet {
+		h.balancer().ServeStatusJSON(w)
 		return
 	}
 
 	// 配置 CRUD 接口
-	if strings.HasPrefix(r.URL.Path, a.adminPath+"/api/") {
-		a.serveConfigAPI(w, r)
+	if strings.HasPrefix(r.URL.Path, cfg.AdminPath+"/api/") {
+		h.serveConfigAPI(w, r, cfg)
 		return
 	}
 
@@ -120,13 +65,13 @@ func (a *App) serveAdmin(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveConfigAPI 配置管理 REST API（需数据库模式）
-func (a *App) serveConfigAPI(w http.ResponseWriter, r *http.Request) {
-	if a.store == nil {
+func (h *Handler) serveConfigAPI(w http.ResponseWriter, r *http.Request, cfg *config.Config) {
+	if h.store == nil {
 		http.Error(w, "configuration API requires database mode (EDGE_DB_URL)", http.StatusNotImplemented)
 		return
 	}
 
-	path := strings.TrimPrefix(r.URL.Path, a.adminPath+"/api")
+	path := strings.TrimPrefix(r.URL.Path, cfg.AdminPath+"/api")
 	seg := strings.Split(strings.Trim(path, "/"), "/")
 	// seg: ["sites"] / ["sites", "{id}"] / ["sites", "{id}", "upstreams"] / ["upstreams", "{id}"] / ["settings"]
 
@@ -135,7 +80,7 @@ func (a *App) serveConfigAPI(w http.ResponseWriter, r *http.Request) {
 	// settings
 	if len(seg) == 1 && seg[0] == "settings" {
 		if r.Method == http.MethodGet {
-			m, err := a.store.GetSettings()
+			m, err := h.store.GetSettings()
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -150,12 +95,12 @@ func (a *App) serveConfigAPI(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			for k, v := range m {
-				if err := a.store.SetSetting(k, v); err != nil {
+				if err := h.store.SetSetting(k, v); err != nil {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
 					return
 				}
 			}
-			if err := a.reload(); err != nil {
+			if err := h.reload(); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -168,29 +113,37 @@ func (a *App) serveConfigAPI(w http.ResponseWriter, r *http.Request) {
 
 	// sites
 	if len(seg) >= 1 && seg[0] == "sites" {
-		a.handleSiteAPI(w, r, seg)
+		h.handleSiteAPI(w, r, seg)
 		return
 	}
 
 	// upstreams
 	if len(seg) >= 1 && seg[0] == "upstreams" {
-		a.handleUpstreamAPI(w, r, seg)
+		h.handleUpstreamAPI(w, r, seg)
 		return
 	}
 
 	// Cloudflare 配额
 	if len(seg) >= 1 && seg[0] == "cf" {
-		a.handleCFAPI(w, r, seg)
+		h.handleCFAPI(w, r, seg)
 		return
 	}
 
 	http.Error(w, "not found", http.StatusNotFound)
 }
 
-func (a *App) handleSiteAPI(w http.ResponseWriter, r *http.Request, seg []string) {
+// reload 配置变更后热加载（回调由上层注入）
+func (h *Handler) reload() error {
+	if h.onChange == nil {
+		return nil
+	}
+	return h.onChange()
+}
+
+func (h *Handler) handleSiteAPI(w http.ResponseWriter, r *http.Request, seg []string) {
 	// GET /sites
 	if len(seg) == 1 && r.Method == http.MethodGet {
-		sites, err := a.store.ListSites()
+		sites, err := h.store.ListSites()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -210,12 +163,16 @@ func (a *App) handleSiteAPI(w http.ResponseWriter, r *http.Request, seg []string
 			http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		id, err := a.store.CreateSite(in.Domain, in.Strategy, in.HealthPath)
+		if in.Domain == "" {
+			http.Error(w, "domain 不能为空", http.StatusBadRequest)
+			return
+		}
+		id, err := h.store.CreateSite(in.Domain, in.Strategy, in.HealthPath)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := a.reload(); err != nil {
+		if err := h.reload(); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -231,11 +188,11 @@ func (a *App) handleSiteAPI(w http.ResponseWriter, r *http.Request, seg []string
 			return
 		}
 		if r.Method == http.MethodDelete {
-			if err := a.store.DeleteSite(id); err != nil {
+			if err := h.store.DeleteSite(id); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			if err := a.reload(); err != nil {
+			if err := h.reload(); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -253,15 +210,19 @@ func (a *App) handleSiteAPI(w http.ResponseWriter, r *http.Request, seg []string
 				http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
 				return
 			}
+			if in.Domain == "" {
+				http.Error(w, "domain 不能为空", http.StatusBadRequest)
+				return
+			}
 			enabled := true
 			if in.Enabled != nil {
 				enabled = *in.Enabled
 			}
-			if err := a.store.UpdateSite(id, in.Domain, in.Strategy, in.HealthPath, enabled); err != nil {
+			if err := h.store.UpdateSite(id, in.Domain, in.Strategy, in.HealthPath, enabled); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			if err := a.reload(); err != nil {
+			if err := h.reload(); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -290,12 +251,16 @@ func (a *App) handleSiteAPI(w http.ResponseWriter, r *http.Request, seg []string
 			http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		upID, err := a.store.CreateUpstream(id, in.Name, in.URL, in.Host, in.Weight, in.Priority, in.Health, in.CFAccount)
+		if in.Name == "" || in.URL == "" {
+			http.Error(w, "name 和 url 不能为空", http.StatusBadRequest)
+			return
+		}
+		upID, err := h.store.CreateUpstream(id, in.Name, in.URL, in.Host, in.Weight, in.Priority, in.Health, in.CFAccount)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := a.reload(); err != nil {
+		if err := h.reload(); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -306,7 +271,7 @@ func (a *App) handleSiteAPI(w http.ResponseWriter, r *http.Request, seg []string
 	http.Error(w, "not found", http.StatusNotFound)
 }
 
-func (a *App) handleUpstreamAPI(w http.ResponseWriter, r *http.Request, seg []string) {
+func (h *Handler) handleUpstreamAPI(w http.ResponseWriter, r *http.Request, seg []string) {
 	// PUT/DELETE /upstreams/{id}
 	if len(seg) == 2 {
 		id, err := strconv.ParseInt(seg[1], 10, 64)
@@ -315,11 +280,11 @@ func (a *App) handleUpstreamAPI(w http.ResponseWriter, r *http.Request, seg []st
 			return
 		}
 		if r.Method == http.MethodDelete {
-			if err := a.store.DeleteUpstream(id); err != nil {
+			if err := h.store.DeleteUpstream(id); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			if err := a.reload(); err != nil {
+			if err := h.reload(); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -341,19 +306,23 @@ func (a *App) handleUpstreamAPI(w http.ResponseWriter, r *http.Request, seg []st
 				http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
 				return
 			}
+			if in.Name == "" || in.URL == "" {
+				http.Error(w, "name 和 url 不能为空", http.StatusBadRequest)
+				return
+			}
 			enabled := true
 			if in.Enabled != nil {
 				enabled = *in.Enabled
 			}
-			if err := a.store.UpdateUpstream(id, in.Name, in.URL, in.Host, in.Weight, in.Priority, in.Health, in.CFAccount, enabled); err != nil {
+			if err := h.store.UpdateUpstream(id, in.Name, in.URL, in.Host, in.Weight, in.Priority, in.Health, in.CFAccount, enabled); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 			// 手动启用时清除该上游的配额自动停用标记
 			if enabled {
-				a.store.ClearAutoOff(in.CFAccount, id)
+				h.store.ClearAutoOff(in.CFAccount, id)
 			}
-			if err := a.reload(); err != nil {
+			if err := h.reload(); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -365,15 +334,15 @@ func (a *App) handleUpstreamAPI(w http.ResponseWriter, r *http.Request, seg []st
 }
 
 // handleCFAPI Cloudflare 配额管理接口
-// GET  /admin/api/cf        → 账号列表 + 各账号用量（实时查询）
-// PUT  /admin/api/cf        → 保存账号列表
-// POST /admin/api/cf/check  → 手动触发配额检查（自动停用/恢复），返回用量与操作结果
-func (a *App) handleCFAPI(w http.ResponseWriter, r *http.Request, seg []string) {
+// GET  {admin_path}/api/cf        → 账号列表 + 各账号用量（实时查询）
+// PUT  {admin_path}/api/cf        → 保存账号列表
+// POST {admin_path}/api/cf/check  → 手动触发配额检查（自动停用/恢复），返回用量与操作结果
+func (h *Handler) handleCFAPI(w http.ResponseWriter, r *http.Request, seg []string) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
 	// POST /cf/check
 	if len(seg) == 2 && seg[1] == "check" && r.Method == http.MethodPost {
-		result, err := a.CheckCFQuotas()
+		result, err := h.CheckCFQuotas()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -388,13 +357,13 @@ func (a *App) handleCFAPI(w http.ResponseWriter, r *http.Request, seg []string) 
 	}
 
 	if r.Method == http.MethodGet {
-		accounts, err := a.store.GetCFAccounts()
+		accounts, err := h.store.GetCFAccounts()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		autoOff, _ := a.store.GetAutoOff()
-		usages := QueryAllCFUsages(accounts)
+		autoOff, _ := h.store.GetAutoOff()
+		usages := cf.QueryAllUsages(accounts)
 		for i := range usages {
 			usages[i].AutoOff = len(autoOff[usages[i].Name]) > 0
 		}
@@ -406,12 +375,12 @@ func (a *App) handleCFAPI(w http.ResponseWriter, r *http.Request, seg []string) 
 	}
 
 	if r.Method == http.MethodPut {
-		var accounts []CFAccount
+		var accounts []config.CFAccount
 		if err := json.NewDecoder(r.Body).Decode(&accounts); err != nil {
 			http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := a.store.SetCFAccounts(accounts); err != nil {
+		if err := h.store.SetCFAccounts(accounts); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -424,23 +393,23 @@ func (a *App) handleCFAPI(w http.ResponseWriter, r *http.Request, seg []string) 
 
 // CheckCFQuotas 检查所有 Cloudflare 账号用量：
 //   - 超阈值 → 自动停用该账号关联的上游（记录 auto_off 标记）
-//   - 未超阈值 → 自动恢复此前被配额停用的上游（下月重置生效）
-func (a *App) CheckCFQuotas() (map[string]interface{}, error) {
+//   - 未超阈值 → 自动恢复此前被配额停用的上游（次日重置生效）
+func (h *Handler) CheckCFQuotas() (map[string]interface{}, error) {
 	result := map[string]interface{}{"changed": false}
-	if a.store == nil {
+	if h.store == nil {
 		return result, nil
 	}
-	accounts, err := a.store.GetCFAccounts()
+	accounts, err := h.store.GetCFAccounts()
 	if err != nil {
 		return nil, err
 	}
 	if len(accounts) == 0 {
-		result["usages"] = []CFUsage{}
+		result["usages"] = []cf.Usage{}
 		return result, nil
 	}
 
-	usages := QueryAllCFUsages(accounts)
-	autoOff, err := a.store.GetAutoOff()
+	usages := cf.QueryAllUsages(accounts)
+	autoOff, err := h.store.GetAutoOff()
 	if err != nil {
 		return nil, err
 	}
@@ -451,28 +420,28 @@ func (a *App) CheckCFQuotas() (map[string]interface{}, error) {
 		if u.Error != "" {
 			continue
 		}
-		ups, err := a.store.ListUpstreamsByAccount(u.Name)
+		ups, err := h.store.ListUpstreamsByAccount(u.Name)
 		if err != nil {
 			continue
 		}
 		for _, up := range ups {
 			if u.OverLimit && up.Enabled {
 				// 超阈值：停用 + 标记
-				a.store.UpdateUpstream(up.ID, up.Name, up.URL, up.Host, up.Weight, up.Priority, up.Health, up.CFAccount, false)
-				a.store.AddAutoOff(u.Name, up.ID)
+				h.store.UpdateUpstream(up.ID, up.Name, up.URL, up.Host, up.Weight, up.Priority, up.Health, up.CFAccount, false)
+				h.store.AddAutoOff(u.Name, up.ID)
 				changed = true
 				actions = append(actions, fmt.Sprintf("账号 %s 使用率 %.1f%% → 自动停用上游 %s", u.Name, u.Percent, up.Name))
 			} else if !u.OverLimit && !up.Enabled && containsID(autoOff[u.Name], up.ID) {
 				// 配额恢复：重新启用（仅限自动停用标记内的）
-				a.store.UpdateUpstream(up.ID, up.Name, up.URL, up.Host, up.Weight, up.Priority, up.Health, up.CFAccount, true)
-				a.store.ClearAutoOff(u.Name, up.ID)
+				h.store.UpdateUpstream(up.ID, up.Name, up.URL, up.Host, up.Weight, up.Priority, up.Health, up.CFAccount, true)
+				h.store.ClearAutoOff(u.Name, up.ID)
 				changed = true
 				actions = append(actions, fmt.Sprintf("账号 %s 使用率 %.1f%% 已恢复 → 重新启用上游 %s", u.Name, u.Percent, up.Name))
 			}
 		}
 	}
 	if changed {
-		if err := a.reload(); err != nil {
+		if err := h.reload(); err != nil {
 			return nil, err
 		}
 	}
@@ -490,5 +459,3 @@ func containsID(list []int64, id int64) bool {
 	}
 	return false
 }
-
-var _ = fmt.Sprintf // keep fmt import if needed
