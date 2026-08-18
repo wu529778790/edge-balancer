@@ -40,6 +40,7 @@ func main() {
 		upstreams,
 		time.Duration(cfg.HealthInterval)*time.Second,
 		time.Duration(cfg.HealthTimeout)*time.Second,
+		cfg.HealthPath,
 	)
 	checker.Start(ctx)
 

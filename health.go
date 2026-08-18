@@ -35,17 +35,19 @@ func (u *Upstream) Leave() { u.inFlight.Add(-1) }
 
 // HealthChecker 定时探测上游健康状态
 type HealthChecker struct {
-	upstreams []*Upstream
-	interval  time.Duration
-	client    *http.Client
+	upstreams   []*Upstream
+	interval    time.Duration
+	client      *http.Client
+	defaultPath string
 }
 
 // NewHealthChecker 构造健康检查器
-func NewHealthChecker(upstreams []*Upstream, interval, timeout time.Duration) *HealthChecker {
+func NewHealthChecker(upstreams []*Upstream, interval, timeout time.Duration, defaultPath string) *HealthChecker {
 	return &HealthChecker{
-		upstreams: upstreams,
-		interval:  interval,
-		client:    &http.Client{Timeout: timeout},
+		upstreams:   upstreams,
+		interval:    interval,
+		client:      &http.Client{Timeout: timeout},
+		defaultPath: defaultPath,
 	}
 }
 
@@ -89,7 +91,7 @@ func (h *HealthChecker) checkAll() {
 func (h *HealthChecker) checkOne(u *Upstream) {
 	path := u.Health
 	if path == "" {
-		path = "/api/health"
+		path = h.defaultPath
 	}
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
