@@ -22,8 +22,10 @@ type Site struct {
 	proxies map[string]*httputil.ReverseProxy
 }
 
-// NewSite 由静态配置构建运行时站点，并预建每个上游的反向代理
-func NewSite(cfg config.SiteConfig, defaultStrategy, defaultHealthPath string) *Site {
+// NewSite 由静态配置构建运行时站点，并预建每个上游的反向代理。
+// oldUpstreams 为上次构建的同名上游（key: "域名|上游名"），用于跨 reload 保留请求级熔断状态
+// （DB 模式每 5 秒热加载重建，若不保留则熔断计数永远被清零、机制失效）。
+func NewSite(cfg config.SiteConfig, defaultStrategy, defaultHealthPath string, oldUpstreams map[string]*Upstream) *Site {
 	s := &Site{
 		Domain:     cfg.Domain,
 		Strategy:   cfg.Strategy,
@@ -54,6 +56,11 @@ func NewSite(cfg config.SiteConfig, defaultStrategy, defaultHealthPath string) *
 		}
 		if u.healthPath == "" {
 			u.healthPath = s.HealthPath
+		}
+		// 保留旧上游的熔断状态（失败计数 + 熔断截止），避免热加载重置熔断
+		if old, ok := oldUpstreams[cfg.Domain+"|"+uc.Name]; ok {
+			u.failCount.Store(old.failCount.Load())
+			u.tripUntil.Store(old.tripUntil.Load())
 		}
 		s.Upstreams = append(s.Upstreams, u)
 		if target, err := url.Parse(uc.URL); err == nil {

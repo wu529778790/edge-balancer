@@ -60,10 +60,21 @@ func (s *Server) reload() error {
 	}
 	s.cfg = cfg
 
+	// 收集旧上游（按 域名|上游名），reload 重建时保留熔断等运行态
+	var oldUpstreams map[string]*dataplane.Upstream
+	if old := s.balancer.Load(); old != nil {
+		oldUpstreams = make(map[string]*dataplane.Upstream)
+		for _, os := range old.Sites() {
+			for _, ou := range os.Upstreams {
+				oldUpstreams[os.Domain+"|"+ou.Name] = ou
+			}
+		}
+	}
+
 	sites := make([]*dataplane.Site, 0, len(cfg.Sites))
 	var upstreams []*dataplane.Upstream
 	for _, sc := range cfg.Sites {
-		site := dataplane.NewSite(sc, cfg.Strategy, cfg.HealthPath)
+		site := dataplane.NewSite(sc, cfg.Strategy, cfg.HealthPath, oldUpstreams)
 		sites = append(sites, site)
 		upstreams = append(upstreams, site.Upstreams...)
 	}

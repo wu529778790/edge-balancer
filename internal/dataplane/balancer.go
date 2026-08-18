@@ -80,6 +80,9 @@ func NewBalancer(sites []*Site, unmatched http.Handler, timeout time.Duration) *
 	return b
 }
 
+// Sites 返回当前全部站点（供 reload 时迁移熔断等运行态）
+func (b *Balancer) Sites() []*Site { return b.sites }
+
 // matchSite 按 Host 头匹配站点（忽略大小写与端口）
 func (b *Balancer) matchSite(host string) *Site {
 	host = strings.ToLower(strings.TrimSpace(host))
