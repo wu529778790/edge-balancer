@@ -73,40 +73,41 @@ jobs:
             set -e
             IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]'):latest"
             CONTAINER="${{ github.event.repository.name }}"
-            CONFIG_FILE="/opt/1panel/apps/openresty/openresty/www/sites/edge-balancer.shenzjd.com/index/config.yaml"
+            BASE_DIR="/opt/1panel/apps/openresty/openresty/www/sites/edge-balancer.shenzjd.com/index"
+            ENV_FILE="$BASE_DIR/.env"
+            CONFIG_FILE="$BASE_DIR/config.yaml"
 
-            # 配置文件由服务器本地维护（1Panel 文件管理或 SSH 提前放好）：
-            # CI 只负责部署，配置不经过 GitHub Secrets、也不进镜像。
-            if [ ! -f "$CONFIG_FILE" ]; then
-              echo "ERROR: $CONFIG_FILE 不存在，请先在服务器上创建配置文件" >&2
+            # DB 模式必需 .env（EDGE_DB_URL/EDGE_DB_TOKEN/EDGE_LISTEN/CF_API_TOKEN）。
+            # 配置（站点/上游/failover 站点/全局设置）存在 Turso 数据库，面板热加载，不需要 config.yaml。
+            # config.yaml 仅本地文件模式调试用：存在则挂载，不存在则跳过。
+            if [ ! -f "$ENV_FILE" ]; then
+              echo "ERROR: $ENV_FILE 不存在，请先在服务器上传 .env（含 EDGE_DB_URL/EDGE_DB_TOKEN/EDGE_LISTEN/CF_API_TOKEN）" >&2
               exit 1
             fi
-
-            # 数据库连接（v3）：从服务器本地 .env 读取（EDGE_DB_URL/EDGE_DB_TOKEN/EDGE_LISTEN），
-            # 敏感信息不进 GitHub；没有 .env 时回退文件配置模式
-            ENV_FILE="/opt/1panel/apps/openresty/openresty/www/sites/edge-balancer.shenzjd.com/index/.env"
-            ENV_ARGS=""
-            if [ -f "$ENV_FILE" ]; then
-              ENV_ARGS="--env-file $ENV_FILE"
-              echo "检测到 .env，启用数据库配置模式"
-            fi
+            ENV_ARGS="--env-file $ENV_FILE"
+            echo "检测到 .env，启用数据库配置模式"
 
             sudo docker pull "$IMAGE"
             sudo docker rm -f "$CONTAINER" || true
 
+            RUN_ARGS="--name $CONTAINER --network host $ENV_ARGS --restart unless-stopped --memory=256m --memory-swap=384m --cpus=0.5 --log-opt max-size=10m --log-opt max-file=3"
+            if [ -f "$CONFIG_FILE" ]; then
+              RUN_ARGS="$RUN_ARGS -v $CONFIG_FILE:/app/config.yaml:ro"
+              echo "检测到 config.yaml，挂载（文件模式调试）"
+            fi
+
             # host 网络：直接监听宿主机 6705（nginx 已反代 127.0.0.1:6705），
             # 无需 -p 端口映射，外部无法直连，仅限本机反代访问
-            sudo docker run -d \
-              --name "$CONTAINER" \
-              --network host \
-              $ENV_ARGS \
-              --restart unless-stopped \
-              --memory=256m \
-              --memory-swap=384m \
-              --cpus=0.5 \
-              --log-opt max-size=10m \
-              --log-opt max-file=3 \
-              -v "$CONFIG_FILE:/app/config.yaml:ro" \
-              "$IMAGE"
+            sudo docker run -d $RUN_ARGS "$IMAGE"
+
+            # 启动后快速自检：容器应处于 running（DB 连接失败会 fatal 退出）
+            sleep 4
+            STATE=$(sudo docker inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null || echo missing)
+            if [ "$STATE" != "running" ]; then
+              echo "ERROR: 容器启动失败（状态 $STATE），最近日志：" >&2
+              sudo docker logs --tail 30 "$CONTAINER" 2>&1 >&2 || true
+              exit 1
+            fi
+            echo "部署完成，容器 $CONTAINER 运行中"
 
             sudo docker image prune -f
