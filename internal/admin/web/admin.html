@@ -232,6 +232,8 @@ input:focus,select:focus{outline:2px solid var(--primary-soft);border-color:var(
           </div>
         </div>
 
+        <div id="failover"></div>
+
         <div class="card">
           <div class="card-head">
             <h2>站点健康状态</h2>
@@ -422,9 +424,60 @@ function loadStatus(){
         '<span class="arr">→</span>'+esc(e.site)+' / '+esc(e.upstream)+'</div>';
     });
     document.getElementById('log').innerHTML=logHtml||'<div class="empty">暂无请求记录</div>';
+    loadFailover();
   }).catch(function(e){document.getElementById('meta').textContent='加载失败: '+e});
 }
 function fmt(n){return n>=10000?(n/10000).toFixed(1)+' 万':n}
+
+/* ---------- DNS 故障切换（新架构） ---------- */
+function loadFailover(){
+  api('/admin/api/failover').then(function(list){
+    var el=document.getElementById('failover');
+    if(!list||!list.length){el.style.display='none';return}
+    el.style.display='';
+    var html='<div class="card"><div class="card-head"><h2>DNS 故障切换</h2><span class="hint">数据面直连目标，此处只控制 DNS 指向</span></div><div class="card-body">';
+    list.forEach(function(s){
+      var stMap={active:['ok','指向主'],failed_over:['warn','已切备'],manual:['strategy','手动接管']};
+      var st=stMap[s.state]||['off',esc(s.state)];
+      html+='<div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px 14px;margin-bottom:10px">';
+      html+='<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">';
+      html+='<a href="https://'+esc(s.domain)+'/" target="_blank" rel="noopener" style="font-weight:600;font-size:13.5px">'+esc(s.domain)+'</a>';
+      html+='<span class="badge '+st[0]+'"><span class="dot"></span>'+st[1]+'</span>';
+      if(s.cooldown_left>0)html+='<span class="hint">冷却 '+s.cooldown_left+'s</span>';
+      html+='<span style="flex:1"></span>';
+      html+='<button class="btn btn-sm" onclick="foSwitch(\''+esc(s.domain)+'\',\'primary\')">切到主</button>';
+      html+='<button class="btn btn-sm" onclick="foSwitch(\''+esc(s.domain)+'\',\'backup\')">切到备</button>';
+      if(s.state==='manual')html+='<button class="btn btn-sm btn-p" onclick="foAuto(\''+esc(s.domain)+'\')">恢复自动</button>';
+      html+='</div>';
+      html+='<div style="display:flex;gap:20px;margin-top:8px;font-size:12px;color:var(--text-2);flex-wrap:wrap">';
+      ['primary','backup'].forEach(function(k){
+        var t=s[k];
+        var b=t.ok?'<span class="badge ok"><span class="dot"></span>健康</span>':'<span class="badge bad"><span class="dot"></span>异常</span>';
+        html+='<div><span style="color:var(--text-3)">'+(k==='primary'?'主':'备')+' '+esc(t.name)+'</span> '+b+
+          ' <span class="code">'+esc(t.record_type)+' → '+esc(t.dns_content)+'</span>'+
+          ' <span class="code">'+esc(t.latency||'')+'</span>'+
+          ' <span style="color:var(--text-4)">'+esc(t.detail||'')+'</span></div>';
+      });
+      html+='</div>';
+      if(s.events&&s.events.length){
+        html+='<div style="margin-top:8px">';
+        s.events.slice(-3).reverse().forEach(function(e){
+          html+='<div class="log"><span class="t">'+esc(e.time)+'</span>'+esc(e.from)+'<span class="arr">→</span>'+esc(e.to)+' <span style="color:var(--text-4)">('+esc(e.reason)+' · '+esc(e.detail)+')</span></div>';
+        });
+        html+='</div>';
+      }
+      html+='</div>';
+    });
+    html+='</div></div>';
+    el.innerHTML=html;
+  }).catch(function(){});
+}
+function foSwitch(domain,target){
+  api('/admin/api/failover/'+encodeURIComponent(domain)+'/switch?target='+target,{method:'POST'}).then(function(){loadFailover()}).catch(function(e){alert('切换失败: '+e)});
+}
+function foAuto(domain){
+  api('/admin/api/failover/'+encodeURIComponent(domain)+'/auto',{method:'POST'}).then(function(){loadFailover()}).catch(function(e){alert('操作失败: '+e)});
+}
 
 /* ---------- 站点管理 ---------- */
 var gSites=[];

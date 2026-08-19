@@ -1,10 +1,12 @@
 # edge-balancer 配置示例（多站点版）
-# 复制本文件为 config.yaml（已 gitignore），填入你的真实上游地址
+# 复制本文件为 config.yaml（已 gitignore），填入你的真实地址
 #
-# 架构：edge-balancer 是中心网关，按 Host 头（域名）路由。
-# - 未匹配到任何 site 的域名 → 直接显示管理面板（管理入口）
-# - 匹配到 site 的域名 → 按该 site 的上游配置分流
-# 各业务域名的 1Panel/nginx 反代目标需指向 edge-balancer 的监听端口。
+# 两种站点模型（按站点二选一）：
+#   A. DNS 直连模式（新架构，推荐）：配置 primary/backup + dns
+#      - 数据面用户直连 DNS 指向的目标（CF Worker / 服务器 IP），edge-balancer 不转发数据
+#      - edge-balancer 只做控制面：探测主/备健康，主挂自动调 Cloudflare DNS API 切换记录
+#   B. 转发模式（旧架构）：配置 upstreams
+#      - edge-balancer 作为中心网关按 Host 头转发到上游组
 
 listen: ":8080"               # 监听地址
 health_interval: 10           # 健康检查间隔（秒）
@@ -15,20 +17,47 @@ health_path: "/api/health"    # 默认健康检查路径
 admin_path: "/admin"          # 面板路径，默认 /admin
 admin_token: "your-token"     # 可选：访问面板需要的 token（留空则不鉴权，公网部署强烈建议配置）
 
-# 默认负载均衡策略（site 未单独指定时生效）：
-#   least-conn  最少连接（推荐：动态均衡，避免某台上游被压垮）
+# 默认负载均衡策略（仅转发模式 site 生效）：
+#   least-conn  最少连接
 #   weighted    加权随机（默认）
 strategy: "least-conn"
 
-# 上游转发超时（秒）：单次转发超过该时长即返回 502，
-# 并计入该上游的熔断失败计数（连续 3 次失败熔断 30 秒，期间自动切到其它上游）
+# 上游转发超时（秒）：仅转发模式生效
 upstream_timeout: 10
 
-# 站点列表：每个域名一组上游配置
+# ---------- DNS 故障切换全局配置（新架构，仅直连模式站点需要） ----------
+dns:
+  zone: "shenzjd.com"            # 域名 zone（需托管在 Cloudflare）
+  ttl: 60                        # 记录 TTL 秒；proxied=True 时 CF 强制自动，此值仅 proxied=False 生效
+  token_env: "CF_API_TOKEN"      # CF API token 环境变量名（权限：Zone.Zone:Read + Zone.DNS:Read + Zone.DNS:Edit）
+  dry_run: true                  # true=监控模式：只探测+决策+记录，不实际切换 DNS（上线观察期用）；验证准确后改 false
+
 sites:
-  - domain: "panhub.shenzjd.com"   # 业务域名（匹配 Host 头）
-    strategy: "least-conn"          # 可选：覆盖全局 strategy
-    health_path: "/api/health"      # 可选：覆盖全局 health_path
+  # ---- 直连模式站点示例（新架构）：DNS 平时 CNAME 到主（CF Worker），主挂自动切 A 到备（服务器 IP） ----
+  - domain: "parse.shenzjd.com"
+    primary:                       # 主目标：用户直连，快
+      name: "cf-worker"
+      record_type: "CNAME"         # 切换后记录类型
+      dns_content: "parse-shenzjd-com.shenzjd.workers.dev"   # 切换后记录内容（CNAME 目标）
+      url: "https://parse-shenzjd-com.shenzjd.workers.dev"   # 探测用 URL（服务器侧）
+      health: "/api/health"        # 探测路径（默认用全局 health_path）
+    backup:                        # 备目标：主挂时切换
+      name: "server"
+      record_type: "A"
+      dns_content: "43.128.70.75"  # 服务器 IP
+      url: "http://127.0.0.1:5269" # 备=服务器自身，探测本地源站
+      health: "/api/health"
+    probe:
+      mode: "server"               # server=服务器侧探测（当前支持）；external=外部探活（预留，主目标建议用外部视角）
+      interval: 10                 # 探测间隔秒
+      timeout: 10                  # 单次探测超时秒（超时视为慢，不判挂）
+      fail_threshold: 3            # 判挂：连续失败次数
+      recover_threshold: 10        # 判恢复：连续成功次数
+      cooldown: 120                # 切换后冷却秒（防抖）
+
+  # ---- 转发模式站点示例（旧架构）：中心网关按 Host 头转发到上游组 ----
+  - domain: "panhub.shenzjd.com"
+    strategy: "least-conn"
     upstreams:
       - name: "cf-worker"
         url: "https://xxx.workers.dev"
@@ -36,9 +65,3 @@ sites:
       - name: "docker"
         url: "http://127.0.0.1:5253"
         priority: 2                 # 兜底：内网源站直连
-
-  - domain: "api.shenzjd.com"      # 另一个域名，独立一组上游
-    upstreams:
-      - name: "main"
-        url: "http://127.0.0.1:8081"
-        priority: 1

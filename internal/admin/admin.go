@@ -15,20 +15,22 @@ import (
 	"github.com/wu529778790/edge-balancer/internal/cf"
 	"github.com/wu529778790/edge-balancer/internal/config"
 	"github.com/wu529778790/edge-balancer/internal/dataplane"
+	"github.com/wu529778790/edge-balancer/internal/failover"
 	"github.com/wu529778790/edge-balancer/internal/store"
 )
 
 // Handler 管理面板 HTTP 处理器
 type Handler struct {
-	store    *store.Store                       // 可能为 nil（文件模式）
-	balancer func() *dataplane.Balancer         // 当前数据平面（每次 reload 后换新）
-	cfg      func() *config.Config              // 当前配置（admin_path / admin_token 可能热更新）
-	onChange func() error                       // 配置变更后热加载；nil 表示不触发
+	store    *store.Store                // 可能为 nil（文件模式）
+	balancer func() *dataplane.Balancer  // 当前数据平面（每次 reload 后换新）
+	failover func() *failover.Manager    // DNS 故障切换控制面（新架构）；可能为 nil
+	cfg      func() *config.Config       // 当前配置（admin_path / admin_token 可能热更新）
+	onChange func() error                // 配置变更后热加载；nil 表示不触发
 }
 
 // New 构造管理面板处理器
-func New(st *store.Store, balancer func() *dataplane.Balancer, cfg func() *config.Config, onChange func() error) *Handler {
-	return &Handler{store: st, balancer: balancer, cfg: cfg, onChange: onChange}
+func New(st *store.Store, balancer func() *dataplane.Balancer, failover func() *failover.Manager, cfg func() *config.Config, onChange func() error) *Handler {
+	return &Handler{store: st, balancer: balancer, cfg: cfg, onChange: onChange, failover: failover}
 }
 
 // isAllowed 校验面板访问（admin_token 鉴权；空则不鉴权）
@@ -54,6 +56,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// failover（DNS 故障切换）接口：状态 / 手动切换 / 恢复自动。
+	// 必须在 serveConfigAPI 之前匹配（/api/failover 前缀会被其捕获）
+	if strings.HasPrefix(r.URL.Path, cfg.AdminPath+"/api/failover") {
+		h.serveFailoverAPI(w, r, cfg)
+		return
+	}
+
 	// 配置 CRUD 接口
 	if strings.HasPrefix(r.URL.Path, cfg.AdminPath+"/api/") {
 		h.serveConfigAPI(w, r, cfg)
@@ -62,6 +71,60 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write(adminHTML)
+}
+
+// serveFailoverAPI DNS 故障切换接口（新架构）
+// GET  {admin_path}/api/failover                       → 全部站点状态
+// POST {admin_path}/api/failover/{domain}/switch?target=primary|backup → 手动切换（进入手动模式）
+// POST {admin_path}/api/failover/{domain}/auto         → 恢复自动
+func (h *Handler) serveFailoverAPI(w http.ResponseWriter, r *http.Request, cfg *config.Config) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	mgr := h.failover()
+	if mgr == nil {
+		http.Error(w, "failover 未启用（配置 primary/backup 后启用）", http.StatusNotImplemented)
+		return
+	}
+
+	// GET /api/failover
+	if r.URL.Path == cfg.AdminPath+"/api/failover" && r.Method == http.MethodGet {
+		json.NewEncoder(w).Encode(mgr.Snapshot())
+		return
+	}
+
+	// POST /api/failover/{domain}/... 
+	prefix := cfg.AdminPath + "/api/failover/"
+	if !strings.HasPrefix(r.URL.Path, prefix) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	seg := strings.Split(strings.TrimPrefix(r.URL.Path, prefix), "/")
+	if len(seg) < 2 || r.Method != http.MethodPost {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	domain := seg[0]
+	site := mgr.Site(domain)
+	if site == nil {
+		http.Error(w, "site not found: "+domain, http.StatusNotFound)
+		return
+	}
+	switch seg[1] {
+	case "switch":
+		target := r.URL.Query().Get("target")
+		if err := site.ManualSwitch(target); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	case "auto":
+		if err := site.ManualAuto(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	default:
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
 // serveConfigAPI 配置管理 REST API（需数据库模式）

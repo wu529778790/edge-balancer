@@ -79,6 +79,10 @@ func main() {
 	go func() {
 		log.Printf("edge-balancer 启动，监听 %s，站点 %d 个", cfg.Listen, len(cfg.Sites))
 		for _, s := range cfg.Sites {
+			if s.Primary.Name != "" || s.Backup.Name != "" {
+				log.Printf("  站点: %-32s DNS 直连模式（主 %s → %s，备 %s → %s）", s.Domain, s.Primary.Name, s.Primary.DNSContent, s.Backup.Name, s.Backup.DNSContent)
+				continue
+			}
 			log.Printf("  站点: %-32s 策略 %-10s 上游 %d 个", s.Domain, s.Strategy, len(s.Upstreams))
 			for _, u := range s.Upstreams {
 				log.Printf("    上游: %-16s -> %s（权重 %d）", u.Name, u.URL, u.Weight)

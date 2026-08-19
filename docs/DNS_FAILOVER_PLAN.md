@@ -232,3 +232,46 @@ sites:
 - 主恢复稳定后自动切回，无来回抖动
 - 面板实时显示：当前 DNS 指向、主备健康、切换历史；手动切换一键生效
 - 全程无需重启容器（配置热加载沿用 DB 模式 5s 轮询）
+
+---
+
+## 十、实施进度与实测验证（2026-08-19）
+
+### 10.1 实测发现（CF DNS 记录盘点）
+
+- **parse.shenzjd.com 当前是 A 记录 → 43.128.70.75，proxied=True（橙色云）**，TTL 自动
+- **关键设计结论**：proxied=True 模式下，用户永远先到 CF 边缘、由 CF 回源到记录目标。
+  切换只是 CF 内部回源目标变化（CNAME→worker 或 A→服务器 IP），**解析 IP 不变，
+  用户本地 DNS 缓存不影响切换生效** → 切换生效 ≈ 秒级~1 分钟，比 CNAME 直连（proxied=False）更干净。
+  因此保持 proxied=True 不改变，切换只 PATCH type + content。
+- 站点清单（A 记录全部 → 43.128.70.75，proxied=True）：panhub、parse、api、alist、
+  imagegate、img、navhub、promoter、tgagent、wx-auth、www、edge-balancer、shenzjd.com 等。
+  本次只迁移 parse 单站。
+
+### 10.2 已实现（代码，commit 待打）
+
+| 模块 | 内容 |
+|------|------|
+| `internal/dns/dns.go` | CF DNS API 客户端：ZoneID/RecordID 解析缓存、GetRecord、PatchRecord（type+content+ttl+proxied） |
+| `internal/failover/failover.go` | 状态机：active/failed_over/manual；探测（超时视为慢不判挂）；判挂 3 次/判恢复 10 次/冷却 120s；切换历史；手动切换；dry-run 监控模式 |
+| `internal/config` | 新增 DNS/Target/Probe 配置模型，旧 upstreams 模型向后兼容，两模型互斥校验 |
+| `internal/server` | failover 站点不建转发器；failover 域名直连提示；failover 仅在启动构建一次（避免 DB reload 反复调 CF API） |
+| `internal/admin` | /admin/api/failover 状态接口 + 手动切换/恢复自动；面板总览新增「DNS 故障切换」卡片 |
+| `cmd/edge-balancer` | CF_API_TOKEN 环境变量；启动日志区分直连/转发站点 |
+
+### 10.3 已验证（端到端）
+
+- CF API：查 zone（0b6d056b26fe435f1f44c7561e697b46）、查/读记录、幂等 PATCH 权限 ✓
+- 启动对齐：正确识别 parse 当前 DNS=A→43.128.70.75 → 状态 failed_over ✓
+- 探测：主（旧 worker）HTTP 200/640ms；备（本机 5269）connection refused ✓
+- 状态机：failed_over 下主恢复稳定 10 次 → 决策切回主 ✓
+- **dry-run 安全阀**：决策正确触发但未修改线上 DNS（parse 记录保持 A→43.128.70.75）✓
+- 单元测试 11 个全过（含熔断/恢复/冷却/手动/dry-run）✓
+
+### 10.4 待办（部署到服务器后）
+
+1. 服务器 nginx：parse 域名反代目标 6705 → 5269（否则 DNS 直连服务器时又绕回 edge-balancer）
+2. 部署 dry_run: true 监控模式跑 1-2 天，核对判定准确
+3. 观察期通过 → dry_run 改 false，开自动切换
+4. 演练：停主 worker → 验证自动切服务器 → 恢复 → 验证切回
+5. 迁移 panhub 及其余站点（每站配置主备）
