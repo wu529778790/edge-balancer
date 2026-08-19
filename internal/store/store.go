@@ -79,6 +79,27 @@ CREATE TABLE IF NOT EXISTS upstreams (
   enabled INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_upstreams_site ON upstreams(site_id);
+CREATE TABLE IF NOT EXISTS failover_sites (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  domain TEXT NOT NULL UNIQUE,
+  primary_name TEXT NOT NULL,
+  primary_record_type TEXT NOT NULL DEFAULT 'CNAME',
+  primary_dns_content TEXT NOT NULL,
+  primary_url TEXT NOT NULL,
+  primary_health TEXT NOT NULL DEFAULT '',
+  backup_name TEXT NOT NULL,
+  backup_record_type TEXT NOT NULL DEFAULT 'A',
+  backup_dns_content TEXT NOT NULL,
+  backup_url TEXT NOT NULL,
+  backup_health TEXT NOT NULL DEFAULT '',
+  probe_mode TEXT NOT NULL DEFAULT 'server',
+  probe_interval INTEGER NOT NULL DEFAULT 10,
+  probe_timeout INTEGER NOT NULL DEFAULT 10,
+  probe_fail_threshold INTEGER NOT NULL DEFAULT 3,
+  probe_recover_threshold INTEGER NOT NULL DEFAULT 10,
+  probe_cooldown INTEGER NOT NULL DEFAULT 120,
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
 `
 	_, err := s.db.Exec(schema)
 	if err != nil {
@@ -237,6 +258,45 @@ func (s *Store) LoadConfig() (*config.Config, error) {
 			cfg.HealthTimeout = n
 		}
 	}
+	// DNS 故障切换全局配置（settings 表）
+	if v := settings["dns_zone"]; v != "" {
+		cfg.DNS.Zone = v
+	}
+	if v := settings["dns_ttl"]; v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.DNS.TTL = n
+		}
+	}
+	if v := settings["dns_dry_run"]; v == "1" {
+		cfg.DNS.DryRun = true
+	}
+	if v := settings["dns_token_env"]; v != "" {
+		cfg.DNS.TokenEnv = v
+	}
+
+	// failover 站点（DNS 直连模式）
+	fos, err := s.ListFailoverSites()
+	if err != nil {
+		return nil, err
+	}
+	for _, fo := range fos {
+		cfg.Sites = append(cfg.Sites, config.SiteConfig{
+			Domain: fo.Domain,
+			Primary: config.TargetConfig{
+				Name: fo.PrimaryName, RecordType: fo.PrimaryRecordType, DNSContent: fo.PrimaryDNSContent,
+				URL: fo.PrimaryURL, Health: fo.PrimaryHealth,
+			},
+			Backup: config.TargetConfig{
+				Name: fo.BackupName, RecordType: fo.BackupRecordType, DNSContent: fo.BackupDNSContent,
+				URL: fo.BackupURL, Health: fo.BackupHealth,
+			},
+			Probe: config.ProbeConfig{
+				Mode: fo.ProbeMode, Interval: fo.ProbeInterval, Timeout: fo.ProbeTimeout,
+				FailThreshold: fo.ProbeFailThreshold, RecoverThreshold: fo.ProbeRecoverThreshold,
+				Cooldown: fo.ProbeCooldown,
+			},
+		})
+	}
 
 	sites, err := s.ListSites()
 	if err != nil {
@@ -373,6 +433,97 @@ func (s *Store) UpdateUpstreamEnabled(id int64, enabled bool) error {
 // DeleteUpstream 删除上游
 func (s *Store) DeleteUpstream(id int64) error {
 	_, err := s.db.Exec(`DELETE FROM upstreams WHERE id=?`, id)
+	return err
+}
+
+// FailoverSiteRecord failover（DNS 故障切换）站点数据库记录
+type FailoverSiteRecord struct {
+	ID   int64  `json:"id"`
+	Domain string `json:"domain"`
+
+	PrimaryName       string `json:"primary_name"`
+	PrimaryRecordType string `json:"primary_record_type"`
+	PrimaryDNSContent string `json:"primary_dns_content"`
+	PrimaryURL        string `json:"primary_url"`
+	PrimaryHealth     string `json:"primary_health"`
+
+	BackupName       string `json:"backup_name"`
+	BackupRecordType string `json:"backup_record_type"`
+	BackupDNSContent string `json:"backup_dns_content"`
+	BackupURL        string `json:"backup_url"`
+	BackupHealth     string `json:"backup_health"`
+
+	ProbeMode            string `json:"probe_mode"`
+	ProbeInterval        int    `json:"probe_interval"`
+	ProbeTimeout         int    `json:"probe_timeout"`
+	ProbeFailThreshold   int    `json:"probe_fail_threshold"`
+	ProbeRecoverThreshold int   `json:"probe_recover_threshold"`
+	ProbeCooldown        int    `json:"probe_cooldown"`
+}
+
+// ListFailoverSites 读取全部 failover 站点
+func (s *Store) ListFailoverSites() ([]FailoverSiteRecord, error) {
+	rows, err := s.db.Query(`SELECT id, domain,
+		primary_name, primary_record_type, primary_dns_content, primary_url, primary_health,
+		backup_name, backup_record_type, backup_dns_content, backup_url, backup_health,
+		probe_mode, probe_interval, probe_timeout, probe_fail_threshold, probe_recover_threshold, probe_cooldown
+		FROM failover_sites ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []FailoverSiteRecord
+	for rows.Next() {
+		var r FailoverSiteRecord
+		if err := rows.Scan(&r.ID, &r.Domain,
+			&r.PrimaryName, &r.PrimaryRecordType, &r.PrimaryDNSContent, &r.PrimaryURL, &r.PrimaryHealth,
+			&r.BackupName, &r.BackupRecordType, &r.BackupDNSContent, &r.BackupURL, &r.BackupHealth,
+			&r.ProbeMode, &r.ProbeInterval, &r.ProbeTimeout, &r.ProbeFailThreshold, &r.ProbeRecoverThreshold, &r.ProbeCooldown); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// CreateFailoverSite 新建 failover 站点
+func (s *Store) CreateFailoverSite(r FailoverSiteRecord) (int64, error) {
+	res, err := s.db.Exec(`INSERT INTO failover_sites(
+		domain,
+		primary_name, primary_record_type, primary_dns_content, primary_url, primary_health,
+		backup_name, backup_record_type, backup_dns_content, backup_url, backup_health,
+		probe_mode, probe_interval, probe_timeout, probe_fail_threshold, probe_recover_threshold, probe_cooldown)
+		VALUES(?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?)`,
+		r.Domain,
+		r.PrimaryName, r.PrimaryRecordType, r.PrimaryDNSContent, r.PrimaryURL, r.PrimaryHealth,
+		r.BackupName, r.BackupRecordType, r.BackupDNSContent, r.BackupURL, r.BackupHealth,
+		r.ProbeMode, r.ProbeInterval, r.ProbeTimeout, r.ProbeFailThreshold, r.ProbeRecoverThreshold, r.ProbeCooldown)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// UpdateFailoverSite 更新 failover 站点
+func (s *Store) UpdateFailoverSite(r FailoverSiteRecord) error {
+	_, err := s.db.Exec(`UPDATE failover_sites SET
+		domain=?,
+		primary_name=?, primary_record_type=?, primary_dns_content=?, primary_url=?, primary_health=?,
+		backup_name=?, backup_record_type=?, backup_dns_content=?, backup_url=?, backup_health=?,
+		probe_mode=?, probe_interval=?, probe_timeout=?, probe_fail_threshold=?, probe_recover_threshold=?, probe_cooldown=?,
+		updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+		WHERE id=?`,
+		r.Domain,
+		r.PrimaryName, r.PrimaryRecordType, r.PrimaryDNSContent, r.PrimaryURL, r.PrimaryHealth,
+		r.BackupName, r.BackupRecordType, r.BackupDNSContent, r.BackupURL, r.BackupHealth,
+		r.ProbeMode, r.ProbeInterval, r.ProbeTimeout, r.ProbeFailThreshold, r.ProbeRecoverThreshold, r.ProbeCooldown,
+		r.ID)
+	return err
+}
+
+// DeleteFailoverSite 删除 failover 站点
+func (s *Store) DeleteFailoverSite(id int64) error {
+	_, err := s.db.Exec(`DELETE FROM failover_sites WHERE id=?`, id)
 	return err
 }
 

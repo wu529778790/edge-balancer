@@ -266,10 +266,25 @@ input:focus,select:focus{outline:2px solid var(--primary-soft);border-color:var(
               <div><label>健康检查路径</label><input id="set-hp" size="12" value="/api/health"></div>
               <div><label>默认均衡策略</label><select id="set-strategy"><option value="least-conn">least-conn</option><option value="weighted">weighted</option></select></div>
               <div><label>上游转发超时（秒，超时自动熔断切换）</label><input id="set-ut" size="6" type="number" value="10"></div>
+              <div><label>DNS zone（直连模式域名所在 zone）</label><input id="set-dns-zone" size="12" placeholder="shenzjd.com"></div>
+              <div><label>DNS TTL（秒）</label><input id="set-dns-ttl" size="5" type="number" value="60"></div>
+              <div><label class="lbl-switch"><span class="switch"><input type="checkbox" id="set-dns-dry"><span class="sl"></span></span><span>DNS 监控模式（dry-run，只决策不切换）</span></label></div>
               <div><label class="lbl-switch"><span class="switch"><input type="checkbox" id="set-rl" checked><span class="sl"></span></span><span>记录请求日志</span></label></div>
               <button class="btn btn-p" onclick="saveSettings()">保存全局设置</button>
             </div></div>
             <div id="msg-settings"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>DNS 直连站点（failover）</h2>
+            <span class="hint">数据面直连目标，本程序只探测 + 切 DNS；保存后 5 秒热加载生效</span>
+            <button class="btn btn-p btn-sm" onclick="openFoModal()">新增</button>
+          </div>
+          <div class="card-body">
+            <div id="fo-sites"></div>
+            <div id="msg-fo"></div>
           </div>
         </div>
 
@@ -507,6 +522,7 @@ function loadConfig(){
     });
     document.getElementById('sites-cfg').innerHTML=html||'<div class="empty">暂无站点，点右上角「新增站点」</div>';
     if(sites.length)loadSettings();
+    loadFailoverSites();
   }).catch(function(e){document.getElementById('msg-sites').className='err';document.getElementById('msg-sites').textContent='加载配置失败: '+e});
 }
 
@@ -565,6 +581,9 @@ function loadSettings(){
     if(m['health_path'])document.getElementById('set-hp').value=m['health_path'];
     if(m['strategy'])document.getElementById('set-strategy').value=m['strategy'];
     if(m['upstream_timeout'])document.getElementById('set-ut').value=m['upstream_timeout'];
+    if(m['dns_zone'])document.getElementById('set-dns-zone').value=m['dns_zone'];
+    if(m['dns_ttl'])document.getElementById('set-dns-ttl').value=m['dns_ttl'];
+    document.getElementById('set-dns-dry').checked=m['dns_dry_run']==='1';
     document.getElementById('set-rl').checked=m['request_log']!=='0';
   });
 }
@@ -576,6 +595,9 @@ function saveSettings(){
   body['health_path']=document.getElementById('set-hp').value;
   body['strategy']=document.getElementById('set-strategy').value;
   body['upstream_timeout']=document.getElementById('set-ut').value;
+  body['dns_zone']=document.getElementById('set-dns-zone').value;
+  body['dns_ttl']=document.getElementById('set-dns-ttl').value;
+  body['dns_dry_run']=document.getElementById('set-dns-dry').checked?'1':'0';
   body['request_log']=document.getElementById('set-rl').checked?'1':'0';
   api('/admin/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(){
     document.getElementById('msg-settings').className='msg';document.getElementById('msg-settings').textContent='全局设置已保存并生效';
@@ -585,6 +607,62 @@ function toggleSite(id,on){api('/admin/api/sites/'+id,{method:'PUT',headers:{'Co
 function toggleUp(id,on){api('/admin/api/upstreams/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:on})}).then(loadConfig)}
 function delSite(id){var s=gSites.find(function(x){return x.id===id});if(!s)return;if(!confirm('删除站点 '+s.domain+' 及其全部上游？'))return;api('/admin/api/sites/'+id,{method:'DELETE'}).then(loadConfig)}
 function delUp(id){if(!confirm('删除该上游？'))return;api('/admin/api/upstreams/'+id,{method:'DELETE'}).then(loadConfig)}
+
+/* ---------- DNS 直连站点（failover）配置 ---------- */
+var gFO=[];
+function loadFailoverSites(){
+  api('/admin/api/failover/sites').then(function(list){
+    gFO=list||[];
+    var html='<table><thead><tr><th>域名</th><th>主（DNS 指向）</th><th>备（DNS 指向）</th><th>探测</th><th></th></tr></thead><tbody>';
+    gFO.forEach(function(s){
+      html+='<tr><td>'+esc(s.domain)+'</td>'+
+        '<td class="code">'+esc(s.primary_name)+' · '+esc(s.primary_record_type)+' → '+esc(s.primary_dns_content)+'</td>'+
+        '<td class="code">'+esc(s.backup_name)+' · '+esc(s.backup_record_type)+' → '+esc(s.backup_dns_content)+'</td>'+
+        '<td>'+esc(s.probe_mode)+' 每 '+s.probe_interval+'s</td>'+
+        '<td><button class="btn btn-sm" onclick="openFoModal('+s.id+')">编辑</button> <button class="btn btn-d btn-sm" onclick="delFo('+s.id+')">删除</button></td></tr>';
+    });
+    html+='</tbody></table>';
+    document.getElementById('fo-sites').innerHTML=html||'<div class="empty">暂无直连站点，点「新增」</div>';
+  }).catch(function(){});
+}
+function openFoModal(id){
+  var s=id==null?null:gFO.find(function(x){return x.id===id});
+  openModal(s?'编辑直连站点':'新增直连站点',[
+    {key:'domain',label:'域名',placeholder:'parse.shenzjd.com'},
+    {key:'primary_name',label:'主·名称',placeholder:'cf-worker'},
+    {key:'primary_record_type',label:'主·记录类型',type:'select',options:['CNAME','A']},
+    {key:'primary_dns_content',label:'主·DNS 指向',placeholder:'xxx.workers.dev'},
+    {key:'primary_url',label:'主·探测 URL',placeholder:'https://xxx.workers.dev'},
+    {key:'primary_health',label:'主·探测路径',placeholder:'/api/health'},
+    {key:'backup_name',label:'备·名称',placeholder:'server'},
+    {key:'backup_record_type',label:'备·记录类型',type:'select',options:['A','CNAME']},
+    {key:'backup_dns_content',label:'备·DNS 指向',placeholder:'43.128.70.75'},
+    {key:'backup_url',label:'备·探测 URL',placeholder:'http://127.0.0.1:5269'},
+    {key:'backup_health',label:'备·探测路径',placeholder:'/api/health'},
+    {key:'probe_mode',label:'探测模式',type:'select',options:[{v:'server',l:'server（服务器侧）'},{v:'external',l:'external（外部探活，预留）'}]},
+    {key:'probe_interval',label:'探测间隔（秒）',type:'number'},
+    {key:'probe_timeout',label:'超时（秒）',type:'number'},
+    {key:'probe_fail_threshold',label:'判挂阈值（次）',type:'number'},
+    {key:'probe_recover_threshold',label:'判恢复阈值（次）',type:'number'},
+    {key:'probe_cooldown',label:'冷却（秒）',type:'number'}
+  ],s,function(){
+    var body={};
+    ['domain','primary_name','primary_record_type','primary_dns_content','primary_url','primary_health',
+     'backup_name','backup_record_type','backup_dns_content','backup_url','backup_health','probe_mode'].forEach(function(k){body[k]=mval(k)});
+    ['probe_interval','probe_timeout','probe_fail_threshold','probe_recover_threshold','probe_cooldown'].forEach(function(k){body[k]=+mval(k)||0});
+    if(!body.domain||!body.primary_name||!body.primary_dns_content||!body.backup_name||!body.backup_dns_content){alert('域名、主/备名称与 DNS 指向必填');return}
+    var path='/admin/api/failover/sites',method='POST';
+    if(s){path+='/'+s.id;method='PUT'}
+    api(path,{method:method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(){
+      closeModal();loadFailoverSites();
+    }).catch(function(e){alert('保存失败: '+e)});
+  });
+}
+function delFo(id){
+  var s=gFO.find(function(x){return x.id===id});if(!s)return;
+  if(!confirm('删除直连站点 '+s.domain+'？将不再探测与切换该域名。'))return;
+  api('/admin/api/failover/sites/'+id,{method:'DELETE'}).then(function(){loadFailoverSites()}).catch(function(e){alert('删除失败: '+e)});
+}
 
 /* ---------- Cloudflare 配额 ---------- */
 var gCF=[];

@@ -1,6 +1,10 @@
 # edge-balancer 配置示例（多站点版）
 # 复制本文件为 config.yaml（已 gitignore），填入你的真实地址
 #
+# 注意：线上部署推荐 DB 模式（设置 EDGE_DB_URL/EDGE_DB_TOKEN），
+#       站点/上游/failover 站点/全局设置全部在面板「配置管理」页编辑，5s 热加载，
+#       无需本文件。本文件仅用于本地文件模式调试。
+#
 # 两种站点模型（按站点二选一）：
 #   A. DNS 直连模式（新架构，推荐）：配置 primary/backup + dns
 #      - 数据面用户直连 DNS 指向的目标（CF Worker / 服务器 IP），edge-balancer 不转发数据

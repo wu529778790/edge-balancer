@@ -77,8 +77,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // GET  {admin_path}/api/failover                       → 全部站点状态
 // POST {admin_path}/api/failover/{domain}/switch?target=primary|backup → 手动切换（进入手动模式）
 // POST {admin_path}/api/failover/{domain}/auto         → 恢复自动
+// GET/POST {admin_path}/api/failover/sites             → failover 站点配置列表/新建（需 DB 模式）
+// PUT/DELETE {admin_path}/api/failover/sites/{id}      → 更新/删除 failover 站点配置
 func (h *Handler) serveFailoverAPI(w http.ResponseWriter, r *http.Request, cfg *config.Config) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+	// failover 站点配置 CRUD（先于状态接口匹配，避免 seg 歧义）
+	if strings.HasPrefix(r.URL.Path, cfg.AdminPath+"/api/failover/sites") {
+		h.handleFailoverSitesAPI(w, r, cfg)
+		return
+	}
+
 	mgr := h.failover()
 	if mgr == nil {
 		http.Error(w, "failover 未启用（配置 primary/backup 后启用）", http.StatusNotImplemented)
@@ -125,6 +134,91 @@ func (h *Handler) serveFailoverAPI(w http.ResponseWriter, r *http.Request, cfg *
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+// handleFailoverSitesAPI failover 站点配置 CRUD（需数据库模式）
+func (h *Handler) handleFailoverSitesAPI(w http.ResponseWriter, r *http.Request, cfg *config.Config) {
+	if h.store == nil {
+		http.Error(w, "configuration API requires database mode (EDGE_DB_URL)", http.StatusNotImplemented)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	seg := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, cfg.AdminPath+"/api/failover/sites"), "/"), "/")
+
+	if len(seg) == 1 && seg[0] == "" { // /api/failover/sites
+		if r.Method == http.MethodGet {
+			list, err := h.store.ListFailoverSites()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			json.NewEncoder(w).Encode(list)
+			return
+		}
+		if r.Method == http.MethodPost {
+			var in store.FailoverSiteRecord
+			if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+				http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			if in.Domain == "" || in.PrimaryName == "" || in.PrimaryDNSContent == "" || in.BackupName == "" || in.BackupDNSContent == "" {
+				http.Error(w, "domain / primary(name+dns_content) / backup(name+dns_content) 必填", http.StatusBadRequest)
+				return
+			}
+			id, err := h.store.CreateFailoverSite(in)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := h.reload(); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]int64{"id": id})
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if len(seg) == 1 && seg[0] != "" { // /api/failover/sites/{id}
+		id, err := strconv.ParseInt(seg[0], 10, 64)
+		if err != nil {
+			http.Error(w, "invalid id", http.StatusBadRequest)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			if err := h.store.DeleteFailoverSite(id); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := h.reload(); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+			return
+		}
+		if r.Method == http.MethodPut {
+			var in store.FailoverSiteRecord
+			if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+				http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			in.ID = id
+			if err := h.store.UpdateFailoverSite(in); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := h.reload(); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+			return
+		}
+	}
+	http.Error(w, "not found", http.StatusNotFound)
 }
 
 // serveConfigAPI 配置管理 REST API（需数据库模式）

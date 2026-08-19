@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -29,6 +30,8 @@ type Server struct {
 	balancer      atomic.Pointer[dataplane.Balancer]
 	checkerCancel context.CancelFunc
 	failover      *failover.Manager // DNS 故障切换（新架构）；无 failover 站点时为 nil
+	failoverCancel context.CancelFunc
+	failoverHash  string            // 上次构建的 failover 配置 hash（DB 模式热加载用）
 	dnsClient     *dns.Client
 	admin         *admin.Handler
 }
@@ -59,9 +62,27 @@ func New(st *store.Store, cfg *config.Config, configPath string, ctx context.Con
 
 // Reload 重新加载配置（DB 模式从数据库；文件模式从配置文件），
 // 重建分流器与健康检查并原子切换。供定时同步与管理 API 调用。
-// 注意：failover 站点只在启动时构建一次（重启生效），reload 不重建，
-// 避免 DB 模式每 5s reload 反复调用 CF API 与重置状态。
 func (s *Server) Reload() error { return s.reload() }
+
+// failoverConfigHash 计算 failover 相关配置的指纹，用于判断是否需要重建
+// （避免 DB 模式每 5s reload 反复重建 failover / 反复调用 CF API）
+func failoverConfigHash(cfg *config.Config) string {
+	var sb strings.Builder
+	sb.WriteString(cfg.DNS.Zone)
+	sb.WriteString("|")
+	fmt.Fprintf(&sb, "%d|%v|", cfg.DNS.TTL, cfg.DNS.DryRun)
+	for _, sc := range cfg.Sites {
+		if sc.Primary.Name == "" {
+			continue
+		}
+		fmt.Fprintf(&sb, "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%d|%d|%d|%d|%d|",
+			sc.Domain,
+			sc.Primary.Name, sc.Primary.RecordType, sc.Primary.DNSContent, sc.Primary.URL, sc.Primary.Health,
+			sc.Backup.Name, sc.Backup.RecordType, sc.Backup.DNSContent, sc.Backup.URL, sc.Backup.Health,
+			sc.Probe.Mode, sc.Probe.Interval, sc.Probe.Timeout, sc.Probe.FailThreshold, sc.Probe.RecoverThreshold, sc.Probe.Cooldown)
+	}
+	return sb.String()
+}
 
 func (s *Server) reload() error {
 	var cfg *config.Config
@@ -76,15 +97,27 @@ func (s *Server) reload() error {
 	}
 	s.cfg = cfg
 
-	// 首次构建 failover（DNS 故障切换）站点
-	if s.failover == nil && s.dnsClient != nil {
-		sites, err := failover.BuildSites(cfg, s.dnsClient)
-		if err != nil {
-			log.Printf("failover 构建失败（继续以转发模式运行）: %v", err)
-		} else if len(sites) > 0 {
-			mgr := failover.NewManager(sites, 10)
-			mgr.Start(s.ctx)
-			s.failover = mgr
+	// failover（DNS 故障切换）：配置指纹变化才重建（支持 DB 模式热加载，且不频繁调 CF API）
+	if s.dnsClient != nil {
+		hash := failoverConfigHash(cfg)
+		if hash != s.failoverHash {
+			if s.failoverCancel != nil {
+				s.failoverCancel()
+				s.failoverCancel = nil
+			}
+			sites, err := failover.BuildSites(cfg, s.dnsClient)
+			if err != nil {
+				log.Printf("failover 构建失败（保持原状态运行）: %v", err)
+			} else if len(sites) > 0 {
+				foCtx, cancel := context.WithCancel(s.ctx)
+				mgr := failover.NewManager(sites, 10)
+				mgr.Start(foCtx)
+				s.failover = mgr
+				s.failoverCancel = cancel
+			} else {
+				s.failover = nil
+			}
+			s.failoverHash = hash
 		}
 	}
 

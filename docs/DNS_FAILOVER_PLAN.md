@@ -275,3 +275,12 @@ sites:
 3. 观察期通过 → dry_run 改 false，开自动切换
 4. 演练：停主 worker → 验证自动切服务器 → 恢复 → 验证切回
 5. 迁移 panhub 及其余站点（每站配置主备）
+
+### 10.5 failover 配置入库（DB 模式恢复，2026-08-19）
+
+- 用户指出"既然有数据库为何还绕回 config.yaml"——正确，收回文件模式妥协。
+- **store 层**：新增 `failover_sites` 表（domain 唯一 + 主/备目标 10 字段 + probe 6 字段）；CRUD；LoadConfig 从库构建 failover 站点，dns 全局配置（dns_zone/dns_ttl/dns_dry_run/dns_token_env）走 settings 表。
+- **server 层**：failover 配置指纹（hash）变化才重建（DB 模式 5s reload 不频繁调 CF API）；重建时取消旧循环、启动新循环。
+- **admin/面板**：/api/failover/sites CRUD（DB 模式）；配置管理页新增「DNS 直连站点」卡片（新增/编辑/删除）+ 全局设置新增 DNS 三项。
+- **部署形态恢复**：.env 恢复 EDGE_DB_URL/TOKEN（DB 模式），CF_API_TOKEN 仍环境变量（安全）；config.yaml 仅本地调试用。
+- 测试：store 层 2 个新测试（CRUD 往返 + LoadConfig 构建 failover/转发共存）全过；全量 15 测试通过。
