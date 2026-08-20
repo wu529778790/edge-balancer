@@ -49,6 +49,7 @@ type TargetStatus struct {
 	RecordType   string  `json:"record_type"`
 	DNSContent   string  `json:"dns_content"`
 	Script       string  `json:"script,omitempty"` // 空=服务器兜底
+	Probed       bool    `json:"probed"`           // 是否已探测（false=待命，未到切换候选不探测）
 	OK           bool    `json:"ok"`
 	Latency      string  `json:"latency"`
 	Detail       string  `json:"detail"`
@@ -158,7 +159,7 @@ func (s *Site) findAccount(name string) *config.CFAccount {
 // probeTarget 探测单个目标。确定性失败（连接错误/4xx/5xx）判失败；
 // 超时视为「慢」不判挂（服务器侧线路差不等于目标挂）。
 func probeTarget(t *config.TargetConfig, healthPath string, timeout time.Duration) TargetStatus {
-	st := TargetStatus{Name: t.Name, RecordType: t.RecordType, DNSContent: t.DNSContent, Script: t.Script, QuotaAccount: t.QuotaAccount}
+	st := TargetStatus{Name: t.Name, RecordType: t.RecordType, DNSContent: t.DNSContent, Script: t.Script, QuotaAccount: t.QuotaAccount, Probed: true}
 	path := healthPath
 	if t.Health != "" {
 		path = t.Health

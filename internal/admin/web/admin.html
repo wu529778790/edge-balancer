@@ -409,7 +409,10 @@ function renderFailover(list){
       html+='<table><thead><tr><th>目标</th><th>类型</th><th>DNS 指向</th><th>健康</th><th>配额</th><th>延迟</th><th>详情</th></tr></thead><tbody>';
       (s.targets||[]).forEach(function(t,i){
         var curCls=i===s.current_index?' style="background:rgba(79,70,229,.08)"':'';
-        var health=t.ok?'<span class="badge ok"><span class="dot"></span>健康</span>':'<span class="badge bad"><span class="dot"></span>异常</span>';
+        var health;
+        if(t.probed===false){health='<span class="badge"><span class="dot"></span>待命</span>'}
+        else if(t.ok){health='<span class="badge ok"><span class="dot"></span>健康</span>'}
+        else{health='<span class="badge bad"><span class="dot"></span>异常</span>'}
         var quotaCell='';
         if(t.quota_account){
           if(t.quota_over){quotaCell='<span class="badge bad"><span class="dot"></span>超限</span> '}
