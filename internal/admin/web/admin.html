@@ -382,7 +382,7 @@ function mval(key){
 /* ---------- 总览（DNS 故障切换为中心） ---------- */
 function loadStatus(){
   Promise.all([api('/admin/api'), api('/admin/api/failover')]).then(function(res){
-    var d=res[0]||{sites:[],time:'-'}, fo=res[1]||[];
+    var d=res[0]||{sites:[],time:'-'}, fo=Array.isArray(res[1])?res[1]:[];
     // KPI：直连站点 / 当前目标健康 / 已切到后继目标 / 最近切换
     var curOk=0, onFallback=0, lastSwitch='暂无';
     fo.forEach(function(s){
