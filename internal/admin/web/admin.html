@@ -393,8 +393,9 @@ function renderFailover(list){
     list.forEach(function(s){
       var stMap={auto:['ok','自动'],manual:['strategy','手动接管']};
       var st=stMap[s.state]||['off',esc(s.state)];
+      // 站点头：域名 + 状态 + 冷却 + 切换按钮
       html+='<div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px 14px;margin-bottom:10px">';
-      html+='<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">';
+      html+='<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">';
       html+='<a href="https://'+esc(s.domain)+'/" target="_blank" rel="noopener" style="font-weight:600;font-size:13.5px">'+esc(s.domain)+'</a>';
       html+='<span class="badge '+st[0]+'"><span class="dot"></span>'+st[1]+' · 指向 '+esc(s.current||'')+'</span>';
       if(s.cooldown_left>0)html+='<span class="hint">冷却 '+s.cooldown_left+'s</span>';
@@ -404,26 +405,35 @@ function renderFailover(list){
       });
       if(s.state==='manual')html+='<button class="btn btn-sm btn-p" onclick="foAuto(\''+esc(s.domain)+'\')">恢复自动</button>';
       html+='</div>';
-      html+='<div style="display:flex;gap:20px;margin-top:8px;font-size:12px;color:var(--text-2);flex-wrap:wrap">';
+      // 目标队列表格
+      html+='<table><thead><tr><th>目标</th><th>类型</th><th>DNS 指向</th><th>健康</th><th>配额</th><th>延迟</th><th>详情</th></tr></thead><tbody>';
       (s.targets||[]).forEach(function(t,i){
-        var b=t.ok?'<span class="badge ok"><span class="dot"></span>健康</span>':'<span class="badge bad"><span class="dot"></span>异常</span>';
-        var q='';
+        var curCls=i===s.current_index?' style="background:rgba(79,70,229,.08)"':'';
+        var health=t.ok?'<span class="badge ok"><span class="dot"></span>健康</span>':'<span class="badge bad"><span class="dot"></span>异常</span>';
+        var quotaCell='';
         if(t.quota_account){
-          q=t.quota_over?'<span class="badge bad"><span class="dot"></span>配额超限</span>':'<span class="badge ok"><span class="dot"></span>配额正常</span>';
-          q+=' <span class="code">'+fmt(t.quota_used||0)+' / '+fmt(t.quota_limit||0)+'（'+Math.round(t.quota_percent||0)+'%）</span>';
-          if(t.quota_error)q+=' <span style="color:var(--text-4)">查询失败</span>';
+          if(t.quota_over){quotaCell='<span class="badge bad"><span class="dot"></span>超限</span> '}
+          else{quotaCell='<span class="badge ok"><span class="dot"></span>正常</span> '}
+          quotaCell+='<span class="code">'+fmt(t.quota_used||0)+' / '+fmt(t.quota_limit||0)+'（'+Math.round(t.quota_percent||0)+'%）</span>';
+          if(t.quota_error)quotaCell+=' <span style="color:var(--text-4)">查询失败</span>';
         }else{
-          q='<span class="badge strategy"><span class="dot"></span>无限额度</span>';
+          quotaCell='<span class="badge strategy"><span class="dot"></span>无限额度</span>';
         }
-        html+='<div>'+(i===s.current_index?'<span class="badge strategy">当前</span>':'')+
-          ' <span style="color:var(--text-3)">'+esc(t.name)+'</span> '+b+' '+q+
-          ' <span class="code">'+esc(t.record_type)+' → '+esc(t.dns_content)+'</span>'+
-          ' <span class="code">'+esc(t.latency||'')+'</span>'+
-          ' <span style="color:var(--text-4)">'+esc(t.detail||'')+'</span></div>';
+        var currentTag=i===s.current_index?' <span class="badge strategy" style="margin-left:4px">当前</span>':'';
+        html+='<tr'+curCls+'>'+
+          '<td><strong>'+esc(t.name)+'</strong>'+currentTag+'</td>'+
+          '<td class="code">'+esc(t.record_type)+'</td>'+
+          '<td class="code">'+esc(t.dns_content)+'</td>'+
+          '<td>'+health+'</td>'+
+          '<td>'+quotaCell+'</td>'+
+          '<td class="code">'+esc(t.latency||'-')+'</td>'+
+          '<td style="color:var(--text-3);font-size:12px">'+esc(t.detail||'')+'</td>'+
+          '</tr>';
       });
-      html+='</div>';
+      html+='</tbody></table>';
+      // 切换事件
       if(s.events&&s.events.length){
-        html+='<div style="margin-top:8px">';
+        html+='<div style="margin-top:10px">';
         s.events.slice(-3).reverse().forEach(function(e){
           html+='<div class="log"><span class="t">'+esc(e.time)+'</span>'+esc(e.from)+'<span class="arr">→</span>'+esc(e.to)+' <span style="color:var(--text-4)">('+esc(e.reason)+' · '+esc(e.detail)+')</span></div>';
         });
