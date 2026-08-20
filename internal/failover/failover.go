@@ -286,7 +286,11 @@ func (s *Site) nextAvailable() int {
 
 // tick 一次探测与状态迁移（调用方持锁）
 func (s *Site) tick() {
+	// manual 锁定：探测当前目标（保持面板健康显示）但不切换、不刷 failStreak、不触发配额推进
 	if s.state == StateManual {
+		cur := &s.Targets[s.currentIndex]
+		p := probeTarget(cur, cur.Health, time.Duration(s.Probe.Timeout)*time.Second)
+		s.setTargetProbe(s.currentIndex, p)
 		return
 	}
 	s.refreshQuotas()
@@ -375,7 +379,21 @@ func (s *Site) doSwitch(index int, reason, detail string) error {
 	}
 	s.appendEvent(from, target.Name, reason, detail)
 	log.Printf("failover %s: route 切到 %s（%s, %s）", s.Domain, target.Name, reason, detail)
+	// 异步探测当前目标：切完后面板 ~3s 立刻显示真实健康状态（不等下一个 60s tick）
+	s.probeCurrentAsync()
 	return nil
+}
+
+// probeCurrentAsync 后台探测当前目标并写入 targetResults（持锁保护；调用方可不持锁）
+func (s *Site) probeCurrentAsync() {
+	go func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		idx := s.currentIndex
+		cur := &s.Targets[idx]
+		p := probeTarget(cur, cur.Health, time.Duration(s.Probe.Timeout)*time.Second)
+		s.setTargetProbe(idx, p)
+	}()
 }
 
 func (s *Site) appendEvent(from, to, reason, detail string) {
