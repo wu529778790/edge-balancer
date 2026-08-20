@@ -99,6 +99,15 @@ func (s *Server) reload() error {
 	s.cfg = cfg
 
 	// failover（DNS 配额轮换）：配置指纹变化才重建（支持 DB 模式热加载，且不频繁调 CF API）
+	if s.dnsClient == nil && cfg.DNS.Zone != "" {
+		// server.New 时 dns_zone 为空被跳过；这里补救：reload 时若配置有了就构造 DNS 客户端
+		if c, err := dns.New(cfg.DNS.TokenEnv); err == nil {
+			s.dnsClient = c
+			log.Printf("failover DNS 客户端延迟初始化（zone=%s）", cfg.DNS.Zone)
+		} else {
+			log.Printf("failover DNS 客户端初始化失败: %v", err)
+		}
+	}
 	if s.dnsClient != nil {
 		hash := failoverConfigHash(cfg)
 		if hash != s.failoverHash {
