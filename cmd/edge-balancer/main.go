@@ -44,6 +44,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("加载配置失败: %v", err)
 	}
+	// 本地只观察模式：EDGE_FORCE_DRY_RUN=1 强制 dry-run，本地实例永不实际切换 DNS
+	// （本地连生产库调试时防误切；服务器实例不受影响）
+	if os.Getenv("EDGE_FORCE_DRY_RUN") == "1" {
+		if !cfg.DNS.DryRun {
+			log.Println("EDGE_FORCE_DRY_RUN=1：强制 dry-run（本地只观察，不实际切换 DNS）")
+		}
+		cfg.DNS.DryRun = true
+	}
 
 	srv, err := server.New(st, cfg, *configPath, ctx)
 	if err != nil {
