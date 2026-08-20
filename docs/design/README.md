@@ -1,12 +1,19 @@
 # 后台管理面板 · 设计稿
 
-Edge Balancer 控制台重新设计稿（浅色 Indigo Web Console 风格，1440×1152 桌面布局，2x 导出 2880×2304）。
+Edge Balancer 控制台重新设计稿（浅色 Indigo Web Console 风格，1440×1152 桌面布局）。
+
+每页提供两种格式：
+
+| 格式 | 说明 | 用途 |
+|---|---|---|
+| PNG（2x，2880×2304） | 位图预览 | 人眼查看、PR/文档引用 |
+| SVG（矢量文本） | 保留精确坐标/颜色/字体/渐变 | **AI 可读结构，还原度 ~100%**，可转代码 |
 
 | 页面 | 文件 | 内容 |
 |---|---|---|
-| 总览 | `overview.png` | 4 KPI + DNS 配额轮换（parse / panhub 双站点，目标队列、健康、配额、状态徽章、切换按钮、事件日志） |
-| 配置管理 | `config.png` | 全局设置（健康探测 + DNS 故障切换）+ DNS 直连站点（目标队列 CRUD） |
-| Cloudflare 配额 | `cf-quota.png` | 多账号配额监控（shenzjd / 2509818162，额度、阈值、使用率进度条） |
+| 总览 | `overview.png` / `overview.svg` | 4 KPI + DNS 配额轮换（parse / panhub 双站点，目标队列、健康、配额、状态徽章、切换按钮、事件日志） |
+| 配置管理 | `config.png` / `config.svg` | 全局设置（健康探测 + DNS 故障切换）+ DNS 直连站点（目标队列 CRUD） |
+| Cloudflare 配额 | `cf-quota.png` / `cf-quota.svg` | 多账号配额监控（shenzjd / 2509818162，额度、阈值、使用率进度条） |
 
 ## 设计 Token
 
