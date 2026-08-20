@@ -63,7 +63,7 @@ type TargetConfig struct {
 // ProbeConfig 探测与切换防抖参数
 type ProbeConfig struct {
 	Mode             string `yaml:"mode"`                  // server（服务器侧探测，当前支持）/ external（外部探活，预留）
-	Interval         int    `yaml:"interval"`              // 探测间隔秒，默认 10
+	Interval         int    `yaml:"interval"`              // 探测间隔秒，默认 60（探测消耗 CF 配额，低频省请求）
 	Timeout          int    `yaml:"timeout"`               // 单次探测超时秒，默认 10
 	FailThreshold    int    `yaml:"fail_threshold"`        // 判挂：连续失败次数，默认 3
 	RecoverThreshold int    `yaml:"recover_threshold"`     // 判恢复：连续成功次数，默认 10
@@ -155,13 +155,13 @@ func Normalize(cfg *Config) {
 				site.Probe.Mode = "server"
 			}
 			if site.Probe.Interval <= 0 {
-				site.Probe.Interval = 10
+				site.Probe.Interval = 60 // 探测消耗 CF Workers 配额（worker 目标打 workers.dev），默认 60s 低频
 			}
 			if site.Probe.Timeout <= 0 {
 				site.Probe.Timeout = 10
 			}
 			if site.Probe.FailThreshold <= 0 {
-				site.Probe.FailThreshold = 3
+				site.Probe.FailThreshold = 2 // 配合 60s 间隔：故障约 2 分钟检出
 			}
 			if site.Probe.RecoverThreshold <= 0 {
 				site.Probe.RecoverThreshold = 10

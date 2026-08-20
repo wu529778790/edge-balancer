@@ -625,9 +625,9 @@ function openFoModal(id){
   ],s,function(){
     var body={targets:readFoTargets()};
     ['domain','route_pattern','probe_mode'].forEach(function(k){body[k]=mval(k)});
-    body.probe_interval=+mval('probe_interval')||10;
+    body.probe_interval=+mval('probe_interval')||60;
     body.probe_timeout=+mval('probe_timeout')||10;
-    body.probe_fail_threshold=+mval('probe_fail_threshold')||3;
+    body.probe_fail_threshold=+mval('probe_fail_threshold')||2;
     body.probe_cooldown=+mval('probe_cooldown')||120;
     body.probe_quota_interval=+mval('probe_quota_interval')||300;
     if(!body.domain||body.targets.length<2){alert('域名必填，且至少 2 个目标（名称 + DNS 指向）');return}

@@ -82,7 +82,7 @@ func mkSite(primaryURL, backupURL string, probe config.ProbeConfig, sw Switcher,
 }
 
 func defaultProbe() config.ProbeConfig {
-	return config.ProbeConfig{Mode: "server", Interval: 10, Timeout: 3, FailThreshold: 3, Cooldown: 120, QuotaInterval: 1}
+	return config.ProbeConfig{Mode: "server", Interval: 60, Timeout: 3, FailThreshold: 2, Cooldown: 120, QuotaInterval: 1}
 }
 
 func upSrv() *httptest.Server {
@@ -227,7 +227,7 @@ func TestHealthTrip(t *testing.T) {
 	}
 }
 
-// 失败不足 3 次不切换
+// 失败不足阈值不切换（threshold=2：1 次不切）
 func TestNoTripBelowThreshold(t *testing.T) {
 	down := downSrv(503)
 	up := upSrv()
@@ -237,13 +237,13 @@ func TestNoTripBelowThreshold(t *testing.T) {
 	sw := &fakeSwitcher{route: &dns.WorkerRoute{ID: "r1", Pattern: "a.test/*", Script: "worker-a-script"}}
 	s := mkSite(down.URL, up.URL, defaultProbe(), sw, q.query)
 
-	for i := 0; i < 2; i++ {
+	for i := 0; i < 1; i++ {
 		s.mu.Lock()
 		s.tick()
 		s.mu.Unlock()
 	}
 	if s.currentIndex != 0 {
-		t.Fatalf("2 次失败不应切换，实际 index=%d", s.currentIndex)
+		t.Fatalf("1 次失败不应切换，实际 index=%d", s.currentIndex)
 	}
 }
 
