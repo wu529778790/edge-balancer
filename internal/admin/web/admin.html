@@ -155,6 +155,19 @@ input:focus,select:focus{outline:2px solid var(--primary-soft);border-color:var(
 .ops-right{text-align:right;white-space:nowrap}
 .ops-right .btn{margin-left:4px}
 .kpi-trend b{color:var(--text-2);font-weight:500}
+
+/* ---------- 站点 → 目标队列 嵌套子表 ---------- */
+.fo-targets{padding:8px 4px 4px 8px;background:#FAFBFC;border-radius:0 0 var(--radius-sm) var(--radius-sm);margin:-1px 0 0}
+.fo-targets-head{display:flex;align-items:center;gap:8px;padding:0 4px 6px;color:var(--text-3);font-size:11.5px}
+.fo-targets-head .add{margin-left:auto}
+.fo-target-row{display:grid;grid-template-columns:120px 110px 1fr 1fr 130px 120px 88px;gap:10px;align-items:center;padding:8px;border:1px solid var(--border);border-radius:var(--radius-sm);background:#fff;margin-bottom:6px;font-size:12.5px}
+.fo-target-row:last-child{margin-bottom:0}
+.fo-target-row .col{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fo-target-row .col-name{font-weight:600}
+.fo-target-row .col-dns{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;color:var(--text-2)}
+.fo-target-row .col-empty{color:var(--text-4)}
+.fo-target-row .col-actions{text-align:right}
+.fo-target-row .col-actions .btn{margin-left:4px;padding:3px 8px;font-size:11.5px}
 </style>
 </head>
 <body>
@@ -595,59 +608,51 @@ var gFO=[];
 function loadFailoverSites(){
   api('/admin/api/failover/sites').then(function(list){
     gFO=list||[];
-    var html='<table><thead><tr><th>域名</th><th style="width:42%">目标队列（有序：配额用尽/故障 → 切下一个）</th><th>探测</th><th class="ops-right">操作</th></tr></thead><tbody>';
+    var html='<table><thead><tr><th>域名</th><th>探测</th><th class="ops-right">操作</th></tr></thead><tbody>';
     gFO.forEach(function(s){
       var ts=s.targets&&s.targets.length?s.targets:[];
       if(!ts.length&&s.primary_name)ts=[{name:s.primary_name,record_type:s.primary_record_type,dns_content:s.primary_dns_content,quota_account:''},{name:s.backup_name,record_type:s.backup_record_type,dns_content:s.backup_dns_content,quota_account:''}];
-      var cur=s.current_index||0;
-      var chips=ts.map(function(t,i){
-        var isCur=i===cur;
-        var isFb=!t.quota_account && !t.script;
-        var cls='chip'+(isCur?' chip-on':(isFb?' chip-fb':''));
-        var suf=isCur?'（当前）':(isFb?'（兜底）':'');
-        return (i?'<span class="chip-arr">→</span>':'')+'<span class="'+cls+'">'+esc(t.name)+suf+'</span>';
-      }).join('');
       var rp=s.route_pattern?'<div class="probe-stack" style="margin-top:3px"><span class="mode">route: '+esc(s.route_pattern)+'</span></div>':'';
       var probe='<div class="probe-stack"><span class="mode">'+esc(s.probe_mode||'server')+' · 每 '+esc(s.probe_interval||60)+'s</span><span>阈值 '+esc(s.probe_fail_threshold||3)+' / 冷却 '+esc(s.probe_cooldown||120)+'s</span></div>';
+      // 站点行
       html+='<tr><td><div style="font-weight:600">'+esc(s.domain)+'</div>'+rp+'</td>'+
-        '<td><div class="queue">'+chips+'</div></td>'+
         '<td>'+probe+'</td>'+
         '<td class="ops-right"><button class="btn btn-sm" onclick="openFoModal('+s.id+')">编辑</button> <button class="btn btn-d btn-sm" onclick="delFo('+s.id+')">删除</button></td></tr>';
+      // 嵌套目标子表行（colspan=3）
+      html+='<tr><td colspan="3"><div class="fo-targets">';
+      html+='<div class="fo-targets-head"><span>目标队列（有序：'+ts.length+' 个，配额用尽 / 故障 → 切下一个）</span>'+
+        '<button class="btn btn-sm add" onclick="openTargetModal('+s.id+',-1)">+ 添加目标</button></div>';
+      if(!ts.length){
+        html+='<div style="color:var(--text-4);padding:8px 4px">暂无目标，先添加</div>';
+      }else{
+        ts.forEach(function(t,i){
+          html+=renderTargetRow(s, t, i);
+        });
+      }
+      html+='</div></td></tr>';
     });
     html+='</tbody></table>';
     document.getElementById('fo-sites').innerHTML=html||'<div class="empty">暂无直连站点，点「新增」</div>';
   }).catch(function(){});
 }
-function foTargetRow(t){
-  t=t||{};
-  return '<div class="fo-tr" style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:6px;display:grid;grid-template-columns:1fr 90px 1.2fr 1fr;gap:6px">'+
-    '<input class="fo-name" placeholder="名称（如 worker-a）" value="'+esc(t.name||'')+'">'+
-    '<select class="fo-type">'+
-      '<option value="route">CF Worker</option>'+
-      '<option value="dns"'+(t.set_dns?' selected':'')+'>DNS 记录</option>'+
-      '<option value="server"'+(!t.set_dns&&!t.script?' selected':'')+'>服务器兜底</option>'+
-    '</select>'+
-    '<input class="fo-script" placeholder="Worker 名（route 切换）" value="'+esc(t.script||'')+'">'+
-    '<input class="fo-dns" placeholder="DNS 值（A→IP / CNAME→平台域名）" value="'+esc(t.dns_content||'')+'">'+
-    '<select class="fo-rt"><option value="CNAME"'+(t.record_type==='A'?'':' selected')+'>CNAME</option><option value="A"'+(t.record_type==='A'?' selected':'')+'>A</option></select>'+
-    '<input class="fo-url" placeholder="探测 URL（https://xxx / http://127.0.0.1:5269）" value="'+esc(t.url||'')+'">'+
-    '<input class="fo-health" placeholder="探测路径（默认 /api/health）" value="'+esc(t.health||'')+'">'+
-    '<div style="display:flex;gap:6px"><input class="fo-quota" placeholder="配额账号（留空=无限额度）" value="'+esc(t.quota_account||'')+'" style="flex:1">'+
-    '<button class="btn btn-d btn-sm" onclick="delFoTarget(this)">删</button></div></div>';
-}
-function addFoTarget(){var box=document.getElementById('fo-targets');if(box)box.insertAdjacentHTML('beforeend',foTargetRow())}
-function delFoTarget(btn){var box=document.getElementById('fo-targets');if(box.children.length<=2){alert('至少保留 2 个目标');return}btn.closest('.fo-tr').remove()}
-function readFoTargets(){
-  var out=[];
-  document.querySelectorAll('#fo-targets .fo-tr').forEach(function(tr){
-    var type=tr.querySelector('.fo-type').value;
-    var t={name:tr.querySelector('.fo-name').value.trim(),record_type:tr.querySelector('.fo-rt').value,dns_content:tr.querySelector('.fo-dns').value.trim(),url:tr.querySelector('.fo-url').value.trim(),health:tr.querySelector('.fo-health').value.trim(),quota_account:tr.querySelector('.fo-quota').value.trim()};
-    if(type==='route'){t.script=tr.querySelector('.fo-script').value.trim();t.set_dns=false}
-    else if(type==='dns'){t.script='';t.set_dns=true}
-    else{t.script='';t.set_dns=false}
-    if(t.name&&t.dns_content)out.push(t);
-  });
-  return out;
+
+// renderTargetRow 渲染单个目标行（嵌套子表内）。s 为站点，t 为目标，i 为下标
+function renderTargetRow(s, t, i){
+  // 类型判断：Script 非空 → CF Worker；SetDNS → DNS 记录；其余 → 服务器兜底
+  var type, typeChip;
+  if(t.script){type='CF Worker';typeChip='<span class="badge strategy">CF Worker</span>';}
+  else if(t.set_dns){type='DNS 记录';typeChip='<span class="badge warn">DNS 记录</span>';}
+  else{type='服务器兜底';typeChip='<span class="badge tag">服务器兜底</span>';}
+  var rtBadge=t.record_type?' <span class="code" style="font-size:10.5px;color:var(--text-4)">'+esc(t.record_type)+'</span>':'';
+  return '<div class="fo-target-row">'+
+    '<div class="col col-name">'+esc(t.name||'-')+'</div>'+
+    '<div class="col">'+typeChip+rtBadge+'</div>'+
+    '<div class="col col-dns" title="'+esc(t.dns_content||'')+'">'+esc(t.dns_content||'-')+'</div>'+
+    '<div class="col col-dns" title="'+esc(t.url||'')+'">'+(t.url?'<span class="col-empty">探测: </span>'+esc(t.url):'<span class="col-empty">未配置</span>')+'</div>'+
+    '<div class="col">'+(t.health?'/'+esc(t.health.replace(/^\//,'')):'<span class="col-empty">/api/health</span>')+'</div>'+
+    '<div class="col">'+(t.quota_account?esc(t.quota_account):'<span class="col-empty">无限</span>')+'</div>'+
+    '<div class="col col-actions"><button class="btn btn-sm" onclick="openTargetModal('+s.id+','+i+')">编辑</button> <button class="btn btn-d btn-sm" onclick="delTarget('+s.id+','+i+')">删</button></div>'+
+    '</div>';
 }
 function openFoModal(id){
   var s=id==null?null:gFO.find(function(x){return x.id===id});
@@ -663,38 +668,76 @@ function openFoModal(id){
     {key:'probe_cooldown',label:'切换冷却（秒）',type:'number'},
     {key:'probe_quota_interval',label:'配额查询间隔（秒）',type:'number'}
   ],s,function(){
-    var body={targets:readFoTargets()};
+    var body={targets:(s&&s.targets)||[]};
     ['domain','route_pattern','probe_mode'].forEach(function(k){body[k]=mval(k)});
     body.probe_interval=+mval('probe_interval')||60;
     body.probe_timeout=+mval('probe_timeout')||10;
     body.probe_fail_threshold=+mval('probe_fail_threshold')||2;
     body.probe_cooldown=+mval('probe_cooldown')||120;
     body.probe_quota_interval=+mval('probe_quota_interval')||300;
-    if(!body.domain||body.targets.length<2){alert('域名必填，且至少 2 个目标（名称 + DNS 指向）');return}
+    if(!body.domain){alert('域名必填');return}
     var path='/admin/api/failover/sites',method='POST';
     if(s){path+='/'+s.id;method='PUT'}
     api(path,{method:method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(){
       closeModal();loadFailoverSites();
     }).catch(function(e){alert('保存失败: '+e)});
   });
-  var ed='<div class="m-field"><label>目标队列（有序：配额用尽 / 故障 → 切下一个；类型：CF Worker=route 接管 / DNS 记录=跨平台 CNAME·A PATCH / 服务器兜底=删 route 回源）</label>'+
-    '<div id="fo-targets"></div><button class="btn btn-sm" onclick="addFoTarget()" style="margin-top:4px">+ 添加目标</button></div>';
-  document.getElementById('modal-body').insertAdjacentHTML('beforeend',ed);
-  targets.forEach(function(){addFoTarget()});
-  document.querySelectorAll('#fo-targets .fo-tr').forEach(function(tr,i){
-    var t=targets[i]||{};
-    tr.querySelector('.fo-name').value=t.name||'';
-    tr.querySelector('.fo-rt').value=t.record_type||'CNAME';
-    tr.querySelector('.fo-dns').value=t.dns_content||'';
-    tr.querySelector('.fo-url').value=t.url||'';
-    tr.querySelector('.fo-health').value=t.health||'';
-    tr.querySelector('.fo-script').value=t.script||'';
-    var ftype=tr.querySelector('.fo-type');
-    if(t.set_dns)ftype.value='dns';
-    else if(t.script)ftype.value='route';
-    else ftype.value='server';
-    tr.querySelector('.fo-quota').value=t.quota_account||'';
+}
+
+// openTargetModal 单目标编辑 modal（站点级字段在主表格；目标单独编辑）
+function openTargetModal(siteId, idx){
+  var s=gFO.find(function(x){return x.id===siteId});
+  if(!s){alert('站点不存在');return}
+  s.targets=s.targets||[];
+  var t=idx<0?{}:s.targets[idx];
+  var isNew=idx<0;
+  // 反推 type（Script 非空→route；SetDNS→dns；其余→server）填回弹窗
+  var typeVal = t.script ? 'route' : (t.set_dns ? 'dns' : 'server');
+  var values=Object.assign({}, t, {type: typeVal});
+  openModal((isNew?'新增':'编辑')+'目标（站点 '+esc(s.domain)+'）',[
+    {key:'name',label:'名称（如 worker-a）',placeholder:'worker-a'},
+    {key:'type',label:'类型',type:'select',options:[{v:'route',l:'CF Worker（route 接管）'},{v:'dns',l:'DNS 记录（跨平台 CNAME/A PATCH）'},{v:'server',l:'服务器兜底（删 route 回源）'}]},
+    {key:'script',label:'Worker 名（仅 route 类型）',placeholder:'parse-shenzjd-com'},
+    {key:'record_type',label:'记录类型（DNS/兜底）',type:'select',options:[{v:'CNAME',l:'CNAME'},{v:'A',l:'A'}]},
+    {key:'dns_content',label:'DNS 值（A→IP / CNAME→平台域名）',placeholder:'43.128.70.75 或 cname.vercel-dns.com'},
+    {key:'url',label:'探测 URL',placeholder:'https://xxx.workers.dev / http://127.0.0.1:5269'},
+    {key:'health',label:'探测路径',placeholder:'/api/health'},
+    {key:'quota_account',label:'配额账号（留空=无限额度）',placeholder:'shenzjd / edgeone-a'}
+  ],values,function(){
+    var newT={
+      name:mval('name').trim(),
+      record_type:mval('record_type'),
+      dns_content:mval('dns_content').trim(),
+      url:mval('url').trim(),
+      health:mval('health').trim(),
+      quota_account:mval('quota_account').trim(),
+      script:'',
+      set_dns:false
+    };
+    var type=mval('type');
+    if(type==='route'){newT.script=mval('script').trim();}
+    else if(type==='dns'){newT.set_dns=true;}
+    if(!newT.name||!newT.dns_content){alert('名称和 DNS 值必填');return}
+    var targets=s.targets.slice();
+    if(isNew){targets.push(newT);}
+    else{targets[idx]=newT;}
+    api('/admin/api/failover/sites/'+s.id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({},s,{targets:targets}))}).then(function(){
+      closeModal();loadFailoverSites();
+    }).catch(function(e){alert('保存失败: '+e)});
   });
+}
+
+// delTarget 删除单个目标（最少保留 2 个）
+function delTarget(siteId, idx){
+  var s=gFO.find(function(x){return x.id===siteId});
+  if(!s)return;
+  s.targets=s.targets||[];
+  if(s.targets.length<=2){alert('至少保留 2 个目标');return}
+  if(!confirm('删除目标「'+s.targets[idx].name+'」？'))return;
+  var targets=s.targets.filter(function(_,i){return i!==idx});
+  api('/admin/api/failover/sites/'+s.id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({},s,{targets:targets}))}).then(function(){
+    loadFailoverSites();
+  }).catch(function(e){alert('删除失败: '+e)});
 }
 function delFo(id){
   var s=gFO.find(function(x){return x.id===id});if(!s)return;

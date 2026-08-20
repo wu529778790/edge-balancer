@@ -54,14 +54,14 @@ type SiteConfig struct {
 //  3. Script 空 且 SetDNS=true = 任意 DNS 目标（跨平台）：切换时 PATCH DNS 记录为 RecordType+DNSContent
 //     （如 CNAME → Vercel/Netlify/Deno/EdgeOne 平台域名，或 A → 服务器 IP），route 需处于删除态。
 type TargetConfig struct {
-	Name         string `yaml:"name"`          // 目标名称（面板展示）
-	RecordType   string `yaml:"record_type"`   // DNS 记录类型（A/CNAME）；SetDNS 目标切换时 PATCH 用，其余为展示
-	DNSContent   string `yaml:"dns_content"`   // DNS 记录内容；SetDNS 目标切换时 PATCH 用，其余为展示
-	URL          string `yaml:"url"`           // 探测用 URL（服务器目标通常本地 http://127.0.0.1:<port>）
-	Health       string `yaml:"health"`        // 探测路径（默认用全局 health_path）
-	QuotaAccount string `yaml:"quota_account"` // 配额信号：引 cf_accounts 账号名；空=无限额度兜底
-	Script       string `yaml:"script"`        // CF Worker 名（非空 = route 切换；空 = DNS 目标/服务器兜底）
-	SetDNS       bool   `yaml:"set_dns"`       // Script 空时：true = 切换 PATCH DNS 记录（跨平台 CNAME/A）；false = 删除 route 回源（服务器兜底）
+	Name         string `yaml:"name"          json:"name"`              // 目标名称（面板展示）
+	RecordType   string `yaml:"record_type"   json:"record_type"`      // DNS 记录类型（A/CNAME）；SetDNS 目标切换时 PATCH 用，其余为展示
+	DNSContent   string `yaml:"dns_content"   json:"dns_content"`      // DNS 记录内容；SetDNS 目标切换时 PATCH 用，其余为展示
+	URL          string `yaml:"url"           json:"url"`              // 探测用 URL（服务器目标通常本地 http://127.0.0.1:<port>）
+	Health       string `yaml:"health"        json:"health"`           // 探测路径（默认用全局 health_path）
+	QuotaAccount string `yaml:"quota_account" json:"quota_account"`   // 配额信号：引 cf_accounts 账号名；空=无限额度兜底
+	Script       string `yaml:"script"        json:"script"`           // CF Worker 名（非空 = route 切换；空 = DNS 目标/服务器兜底）
+	SetDNS       bool   `yaml:"set_dns"       json:"set_dns"`          // Script 空时：true = 切换 PATCH DNS 记录（跨平台 CNAME/A）；false = 删除 route 回源（服务器兜底）
 }
 
 // ProbeConfig 探测与切换防抖参数

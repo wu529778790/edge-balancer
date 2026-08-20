@@ -542,13 +542,34 @@ func (s *Store) ListFailoverSites() ([]FailoverSiteRecord, error) {
 			return nil, err
 		}
 		if targetsRaw != "" {
-			if err := json.Unmarshal([]byte(targetsRaw), &r.Targets); err != nil {
+			// 兼容历史数据：旧版本 config.TargetConfig 无 json tag，序列化用 Go 字段名（大写开头）。
+			// 现已加 json tag（小写），此处把大写键替换为小写，让反序列化填回字段。
+			if err := json.Unmarshal([]byte(normalizeTargetKeys(targetsRaw)), &r.Targets); err != nil {
 				return nil, fmt.Errorf("解析 %s 的 targets: %w", r.Domain, err)
 			}
 		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// normalizeTargetKeys 把旧数据大写键（Name/RecordType/...）转为小写，与 config.TargetConfig 的 json tag 对齐。
+// 历史写入未带 json tag，用 Go 字段名；新数据本身已小写，替换无副作用。
+func normalizeTargetKeys(raw string) string {
+	repls := []struct{ old, new string }{
+		{`"Name":`, `"name":`},
+		{`"RecordType":`, `"record_type":`},
+		{`"DNSContent":`, `"dns_content":`},
+		{`"URL":`, `"url":`},
+		{`"Health":`, `"health":`},
+		{`"QuotaAccount":`, `"quota_account":`},
+		{`"Script":`, `"script":`},
+		{`"SetDNS":`, `"set_dns":`},
+	}
+	for _, r := range repls {
+		raw = strings.ReplaceAll(raw, r.old, r.new)
+	}
+	return raw
 }
 
 // CreateFailoverSite 新建 failover 站点（targets 序列化为 JSON，旧 primary/backup 字段同步写入以兼容）
