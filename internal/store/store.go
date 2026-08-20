@@ -297,11 +297,12 @@ func (s *Store) LoadConfig() (*config.Config, error) {
 		cfg.DNS.TokenEnv = v
 	}
 
-	// failover 站点（DNS 配额轮换）
+	// failover 站点（DNS 配额轮换）——域名已占用的跳过后续转发模型（一个域名只能一种模式）
 	fos, err := s.ListFailoverSites()
 	if err != nil {
 		return nil, err
 	}
+	foDomains := map[string]bool{}
 	for _, fo := range fos {
 		targets := fo.Targets
 		if len(targets) == 0 {
@@ -319,6 +320,7 @@ func (s *Store) LoadConfig() (*config.Config, error) {
 				})
 			}
 		}
+		foDomains[fo.Domain] = true
 		cfg.Sites = append(cfg.Sites, config.SiteConfig{
 			Domain: fo.Domain,
 			Targets: targets,
@@ -337,6 +339,9 @@ func (s *Store) LoadConfig() (*config.Config, error) {
 	for _, st := range sites {
 		if !st.Enabled {
 			continue
+		}
+		if foDomains[st.Domain] {
+			continue // 已配置配额轮换的域名，跳过旧转发模型
 		}
 		sc := config.SiteConfig{Domain: st.Domain, Strategy: st.Strategy, HealthPath: st.HealthPath}
 		for _, u := range st.Upstreams {
