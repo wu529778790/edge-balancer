@@ -159,7 +159,7 @@ input:focus,select:focus{outline:2px solid var(--primary-soft);border-color:var(
       <div class="nav-label">管理</div>
       <div class="nav-item" id="nav-config" onclick="showTab('config')">
         <svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="9" cy="9" r="7" stroke="currentColor" stroke-width="1.5"/><circle cx="9" cy="9" r="3" stroke="currentColor" stroke-width="1.5"/><path d="M2.5 9H15.5" stroke="currentColor" stroke-width="1.5"/></svg>
-        <span>站点管理</span>
+        <span>配置管理</span>
       </div>
       <div class="nav-item" id="nav-cf" onclick="showTab('cf')">
         <svg viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M9 2V16M9 2L5.5 5.5M9 2L12.5 5.5M9 16L5.5 12.5M9 16L12.5 12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -229,14 +229,6 @@ input:focus,select:focus{outline:2px solid var(--primary-soft);border-color:var(
         </div>
 
         <div id="failover"></div>
-
-        <div class="card" id="fwd-card" style="display:none">
-          <div class="card-head">
-            <h2>转发站点（兼容模式）</h2>
-            <span class="hint">旧架构：中心网关转发。迁移到 DNS 直连后此区自动消失</span>
-          </div>
-          <div class="card-body" id="sites"></div>
-        </div>
       </div>
 
       <!-- 站点管理 -->
@@ -264,24 +256,12 @@ input:focus,select:focus{outline:2px solid var(--primary-soft);border-color:var(
         <div class="card">
           <div class="card-head">
             <h2>DNS 直连站点（failover）</h2>
-            <span class="hint">数据面直连目标，本程序只探测 + 切 DNS；保存后 5 秒热加载生效</span>
+            <span class="hint">数据面直连目标，本程序只探测 + 切 route；保存后 5 秒热加载生效</span>
             <button class="btn btn-p btn-sm" onclick="openFoModal()">新增</button>
           </div>
           <div class="card-body">
             <div id="fo-sites"></div>
             <div id="msg-fo"></div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card-head">
-            <h2>转发站点（兼容模式）</h2>
-            <span class="hint">旧架构：中心网关按 Host 头转发；迁移到 DNS 直连后不再需要</span>
-            <button class="btn btn-p btn-sm" onclick="openSiteModal()">新增站点</button>
-          </div>
-          <div class="card-body">
-            <div id="sites-cfg"></div>
-            <div id="msg-sites"></div>
           </div>
         </div>
       </div>
@@ -328,14 +308,15 @@ function api(path,opts){var u=path;var t=qs('token');if(t)u+=(u.indexOf('?')<0?'
 
 function showTab(n){
   PAGE=n;
-  var titles={status:'总览',config:'站点管理',cf:'Cloudflare 配额'};
+  var titles={status:'总览',config:'配置管理',cf:'Cloudflare 配额'};
   document.getElementById('page-title').textContent=titles[n]||'总览';
   ['status','config','cf'].forEach(function(k){
     document.getElementById('nav-'+k).className='nav-item'+(k===n?' on':'');
     var p=document.getElementById('panel-'+k);
     if(p){p.className='panel'+(k===n?' on':'')}
   });
-  if(n==='config'){loadConfig();loadCF()}
+  if(n==='status'){loadStatus()}
+  if(n==='config'){loadFailoverSites();loadCF()}
   if(n==='cf'){loadCF()}
 }
 
@@ -391,42 +372,15 @@ function loadStatus(){
       if(s.events&&s.events.length){var e=s.events[s.events.length-1];lastSwitch=e.time+' '+e.from+'→'+e.to}
     });
     document.getElementById('kpi-sites').textContent=fo.length;
-    document.getElementById('kpi-sites-t').textContent=fo.length?('DNS 直连 / 转发 '+d.sites.length):'暂无直连站点';
+    document.getElementById('kpi-sites-t').textContent=fo.length?('DNS 直连站点 '+fo.length):'暂无直连站点';
     document.getElementById('kpi-health').textContent=curOk+' / '+fo.length;
     document.getElementById('kpi-health-t').textContent='当前目标实时探测';
     document.getElementById('kpi-total').textContent=onFallback;
     document.getElementById('kpi-total-t').textContent=onFallback?('DNS 已切到后继目标'):'全部指向首个目标';
     document.getElementById('kpi-flight').textContent=lastSwitch;
-    document.getElementById('meta').textContent='更新于 '+d.time+' · '+fo.length+' 直连 / '+d.sites.length+' 转发';
+    document.getElementById('meta').textContent='更新于 '+d.time;
     renderFailover(fo);
-    renderForwardSites(d);
   }).catch(function(e){document.getElementById('meta').textContent='加载失败: '+e});
-}
-function renderForwardSites(d){
-  var el=document.getElementById('fwd-card');
-  if(!d.sites||!d.sites.length){el.style.display='none';return}
-  el.style.display='';
-  var html='';
-  d.sites.forEach(function(s){
-    html+='<div class="site-head"><a class="s-name" href="https://'+esc(s.domain)+'/" target="_blank" rel="noopener">'+
-      '<svg viewBox="0 0 15 15" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="7.5" cy="7.5" r="6" stroke="currentColor" stroke-width="1.3"/></svg>'+
-      esc(s.domain)+' <span class="badge strategy">'+esc(s.strategy)+'</span></a>'+
-      '<div class="ops"><span class="hint" style="font-size:12px;color:var(--text-4)">'+
-      s.upstreams.filter(function(x){return x.enabled&&x.healthy}).length+' / '+s.upstreams.length+' 上游健康</span></div></div>';
-    html+='<table><thead><tr><th>上游</th><th>地址</th><th>状态</th><th>权重</th><th>优先级</th><th>在途</th><th>累计转发</th></tr></thead><tbody>';
-    s.upstreams.forEach(function(x){
-      var st,cls;
-      if(!x.enabled){st='已停用';cls='off'}
-      else if(x.tripped){st='熔断中';cls='warn'}
-      else if(x.healthy){st='健康';cls='ok'}
-      else{st='不健康';cls='bad'}
-      html+='<tr'+(x.enabled?'':' class="up-off"')+'><td>'+esc(x.name)+'</td><td class="code"><a href="'+esc(x.url)+'" target="_blank" rel="noopener">'+esc(x.url)+'</a></td>'+
-        '<td><span class="badge '+cls+'"><span class="dot"></span>'+st+'</span></td>'+
-        '<td>'+x.weight+'</td><td>'+x.priority+'</td><td>'+x.inFlight+'</td><td class="code">'+fmt(x.total)+'</td></tr>';
-    });
-    html+='</tbody></table>';
-  });
-  document.getElementById('sites').innerHTML=html||'<div class="empty">暂无转发站点</div>';
 }
 function fmt(n){return n>=10000?(n/10000).toFixed(1)+' 万':n}
 
