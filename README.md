@@ -34,6 +34,23 @@
                           edge-balancer（Docker 控制面，不转发流量）
 ```
 
+## 目标平台
+
+支持把同一份业务代码部署到下表任意平台，按配额水位/健康状态**自动轮换**。CF 内部走 Route 切换；跨平台走 **DNS CNAME 切换**（CF 边缘回源目标变化，proxied 下用户解析 IP 不变，秒级生效）。轮换周期 = 各平台自身配额周期（**按月/日**），不再局限于每日。
+
+| 平台 | 免费额度 | 自定义域名 | 商业限制 | 切换机制 | 适配状态 |
+|------|----------|-----------|----------|----------|----------|
+| **Cloudflare Workers** | 10 万请求/天/账号 | ✓ | 无 | Route 切换（同账号） | ✅ 已支持 |
+| **腾讯云 EdgeOne Makers** 🥇 | Edge Functions **300 万/月** + Cloud Functions 100 万/月 | ✓（200 个）| 无（国际站免备案）| CNAME | ⏳ 待适配 |
+| **Fastly Compute** | 1000 万请求/月（$50 credit）+ 100GB 带宽 | ✓（5 域名）| ⚠️ 超 $50 credit 按量计费 | CNAME | ⏳ 待适配 |
+| **Deno Deploy** | 100 万请求/月 + 20GB 出口 | ✓（50/org）| 无 | CNAME（Nitro preset）| ⏳ 待适配 |
+| **Netlify**（Starter）| Edge Functions 100 万/月 + Functions 12.5 万/月 | ✓ 无限 | 无 | CNAME（Nitro preset）| ⏳ 待适配 |
+| Vercel（Hobby）备选 | Edge Requests 100 万/月 | ✓ | ⚠️ **禁商用** | CNAME | ❓ 待定 |
+
+**优先级**：`EdgeOne（300 万/月）→ Deno / Netlify（100 万/月）→ CF worker（10 万/天）→ 服务器兜底`——按配额周期轮换，全免费额度最大化。
+
+**Vercel 说明**：Hobby 免费层禁止商用（Next.js 商业站点不合规）。若坚持接入需升级 Pro（$20/月/席位），不在默认轮换列表。
+
 ## 快速开始
 
 ```bash
