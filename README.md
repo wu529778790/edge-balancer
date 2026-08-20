@@ -1,134 +1,107 @@
 # edge-balancer
 
-轻量多云流量分发器（中心网关）—— 用 Docker 部署在自有服务器上，**按域名（Host 头）路由**到各自的 N 个上游（Cloudflare Worker、Vercel、或任意 HTTP 后端），并带健康检查与自动剔除。未匹配到业务域名的访问（如管理域名）直接展示**状态管理面板**。
+**Cloudflare Worker 配额轮换控制面** —— 自己的域名直连 CF Worker（不暴露 `*.workers.dev`），免费版配额（10 万请求/天/账号）用完自动切下一个目标；多 Worker / 服务器兜底按有序队列轮换，每日配额重置自动回切。Go 单二进制，Docker 一键部署。
 
-免费替代 Cloudflare Load Balancer 的「分流 + 容灾」逻辑，部署在自己的服务器上，不消耗 Cloudflare 免费配额。
+免费替代「Cloudflare Load Balancer + 多账号 Worker 手动切流」。
+
+## 解决的问题
+
+- 不想暴露 `*.workers.dev` → 自己的域名直连 Worker，数据面不绕路
+- CF Workers Free 配额是**账号级**（10 万请求/**天**）→ 配额用完**自动**切下一个账号 / 目标
+- 不想盯着面板手动切 → 双信号自动决策（配额超限 / 健康失败），每日零点自动回切
 
 ## 特性
 
-- **多域名路由**：每个域名（site）独立一组上游，按 Host 头分发（如 `panhub.shenzjd.com` 和 `api.shenzjd.com` 各自分流）
-- **管理入口**：访问未配置的域名（如 `edge-balancer.shenzjd.com`）直接看到状态面板
-- **加权分流 / 灰度**：每个请求独立按权重随机决策，精确到请求级的切量（如 50:50、90:10）
-- **逐级兜底（priority）**：高优先级上游健康时独享流量，挂了自动切到下一级（如 CF Worker → 本地服务）
-- **最少连接（least-conn）**：组内按实时在途请求数动态均衡，避免某一台上游被突发流量压垮
-- **健康检查**：定时探测上游健康状态，挂了自动剔除，恢复自动加入
-- **状态面板**：`/admin` 实时查看各域名下上游的健康状态、累计转发数、在途连接与最近请求分发记录
-- **纯转发、极轻量**：Go 单二进制，I/O 转发，几乎不耗 CPU
-- **配置即代码**：一个 `config.yaml` 搞定
+- **配额轮换队列**：N 个目标有序排列（worker-a → worker-b → server 兜底），配额用尽或故障 → 切下一个；每日配额重置自动切回最早可用目标
+- **双信号决策**：配额（GraphQL 按账号查当天用量）为主，健康为辅（严格判定：连接拒绝 / 4xx / 5xx 连续 3 次才算挂，**超时不判挂**，防服务器侧线路误判）
+- **数据面直连**：只切 DNS / Workers Route，不转发字节，用户直连目标（快、省、不绕路）
+- **切换秒级生效**：增删 Workers Route / DNS 记录，proxied 下用户 DNS 缓存不影响
+- **凭据零落盘**：所有 token 走环境变量（`token_env`），面板不回传明文
+- **DB 模式 + 热加载**：Turso(libSQL) 存储，面板改配置 5 秒生效，无需重启
+- **管理面板三页**：总览（KPI + 站点队列实时状态）/ 配置管理（全局设置 + 站点 CRUD）/ Cloudflare 配额（多账号水位监控）
+
+## 架构
+
+```
+                ┌───────────────────────────────────────────┐
+  用户 ── 自己域名 ──►  CF 边缘（proxied，用户只见自己域名）     │
+                │    Route → worker-a（账号 A 配额）            │
+                │    配额用尽 / 故障 → 切换（增删 Route）        │
+                │    Route → worker-b（账号 B 配额）            │
+                │    Route → server 兜底（A 记录回源服务器）     │
+                └────────────────────▲──────────────────────┘
+                                     │ 决策：配额查询 + 健康探测
+                          edge-balancer（Docker 控制面，不转发流量）
+```
 
 ## 快速开始
 
 ```bash
-# 1. 准备配置
-cp config.example.yaml config.yaml
-# 编辑 config.yaml，填入你的站点（域名）和上游地址
+# 本地跑（DB 模式，配置全在面板编辑）
+set -a; source .env; set +a   # EDGE_DB_URL / EDGE_DB_TOKEN / 各 CF token
+go run ./cmd/edge-balancer
 
-# 2. 本地运行
-go run ./cmd/edge-balancer -config config.yaml
-
-# 3. 或 Docker 运行
+# 或 Docker（服务器部署）
 docker build -t edge-balancer .
-docker run -p 8080:8080 -v $(pwd)/config.yaml:/app/config.yaml edge-balancer
+docker run --network host -e EDGE_DB_URL=... -e EDGE_DB_TOKEN=... edge-balancer
 ```
 
-## 配置说明
+面板：`http://<host>/admin?token=<admin_token>`
+
+## 配置
+
+推荐 **DB 模式**（设 `EDGE_DB_URL` / `EDGE_DB_TOKEN`，站点 / 目标队列 / CF 账号 / 全局设置全在面板编辑，5s 热加载）；本地调试可用 `config.yaml` 文件模式。完整示例见 [`config.example.yaml`](config.example.yaml)。
 
 ```yaml
-listen: ":8080"               # 监听地址
-health_interval: 10           # 健康检查间隔（秒）
-health_timeout: 5             # 健康检查超时（秒）
-health_path: "/api/health"    # 默认健康检查路径
-strategy: "least-conn"        # 默认策略：least-conn（最少连接）/ weighted（加权随机）
-admin_path: "/admin"          # 状态面板路径
-admin_token: "your-token"     # 面板 token（推荐配置）
+dns:
+  zone: "shenzjd.com"            # 域名 zone（Cloudflare 托管）
+  token_env: "CF_API_TOKEN"      # 切换 token（Zone.DNS:Edit + Workers Routes:Edit）
+  dry_run: true                  # 监控模式：只决策不切换；验证后改 false
+
+cf_accounts:
+  - name: "shenzjd"              # 与 target.quota_account 对应
+    account_id: "xxx"
+    quota: 100000                # 免费版 10 万请求/天
+    threshold: 90
+    token_env: "CF_TOKEN_SHENZJD"
 
 sites:
-  - domain: "panhub.shenzjd.com"   # 业务域名（匹配 Host 头）
-    strategy: "least-conn"         # 可选：覆盖全局策略
-    health_path: "/api/health"     # 可选：覆盖全局健康检查路径
-    upstreams:
-      - name: "cf-worker"
-        url: "https://xxx.workers.dev"
-        priority: 1                # 优先级：越小越优先，挂了才轮到下一级
-      - name: "self-server"
-        url: "http://127.0.0.1:3000"
-        priority: 2                # 兜底
+  - domain: "parse.shenzjd.com"
+    targets:                     # 有序队列：配额用尽/故障 → 切下一个；末位为兜底
+      - name: "worker-a"
+        record_type: "CNAME"
+        dns_content: "parse-shenzjd-com.shenzjd.workers.dev"
+        quota_account: "shenzjd"      # 配额定标：有 quota_account 的都有额度上限
+      - name: "server"
+        record_type: "A"
+        dns_content: "43.128.70.75"
+        url: "http://127.0.0.1:5269"  # 无 quota_account = 无限额度兜底
+    probe:
+      interval: 10
+      fail_threshold: 3          # 连续失败 3 次判挂
+      cooldown: 120
 ```
 
-| 字段 | 必填 | 说明 |
-|------|------|------|
-| `domain` | ✅ | 站点域名，匹配请求的 Host 头；未匹配的域名直接显示状态面板 |
-| `name` | ✅ | 上游名称（站点内唯一） |
-| `url` | ✅ | 上游地址 |
-| `priority` | - | 优先级，越小越优先；高优先级健康则独享流量，挂了才轮到下一级 |
-| `weight` | - | 仅 `strategy: weighted` 时生效，组内分流权重 |
-| `health` | - | 该上游专属健康检查路径，覆盖站点/全局 `health_path` |
+## 管理面板
 
-### 两种使用模式
+![总览](docs/design/screenshots/01-overview.png)
 
-**逐级兜底（主备备）**：给每个上游设不同 `priority`，实现「CF Worker → 本地服务」的容灾链，高优先级挂了自动切下一级。
+![配置管理](docs/design/screenshots/02-config.png)
 
-**灰度分流（多活）**：不设 `priority`（或设相同值），配合 `strategy: weighted` + 不同 `weight`，实现按比例的流量切分。
-
-## 状态面板（v2）
-
-- **管理入口**：访问未配置的域名（如 `edge-balancer.shenzjd.com`）直接显示面板；或访问任意已配置域名的 `/admin` 路径
-- 每个站点（域名）一张表：上游健康状态（绿/红）、权重、优先级、在途连接数、累计转发次数
-- 最近 200 条请求记录（时间 + 域名 + 路径 + 实际转发到了哪个站点/上游）
-- 页面每 3 秒自动刷新；数据接口为 `/admin/api`（JSON）
-
-配置了 `admin_token` 后，访问面板需携带 `?token=<token>`。
-
-## 配置管理（v3，数据库模式）
-
-设置环境变量后，配置从 Turso(libSQL) 数据库读取，**页面改配置 5 秒内自动生效，无需重启**：
-
-```bash
-# 容器环境变量（敏感信息放服务器本地 .env，不进镜像）
-EDGE_DB_URL=libsql://your-db.turso.io
-EDGE_DB_TOKEN=your-token
-EDGE_LISTEN=:6705              # 监听地址
-```
-
-- **管理页面**：`/admin` → 「配置管理」标签页，可增删改站点/上游（名称、URL、host、权重、优先级、启用开关）、改全局设置，保存即写库并热加载
-- **REST API**：`/admin/api/sites`、`/admin/api/sites/{id}/upstreams`、`/admin/api/settings`（增删改查，带 admin_token 鉴权）
-- **热加载**：运行时常驻 5 秒轮询数据库，配置变更自动重建分流器与健康检查（原子切换，无感知）
-- 未设置 `EDGE_DB_URL` 时回退到本地 `config.yaml` 文件模式（向后兼容）
+![Cloudflare 配额](docs/design/screenshots/03-cf-quota.png)
 
 ## 代码结构
 
 ```
-cmd/edge-balancer/main.go    # 入口：启动、定时器、优雅退出
-internal/server/             # 组装层：热加载（原子重建分流器）+ 顶层路由
-internal/config/             # 配置模型 + 默认值 + 校验（单一真源）
-internal/store/              # Turso(libSQL) 存储与迁移
-internal/dataplane/          # 数据平面：转发器 / 站点选路 / 健康检查
-internal/admin/              # 控制平面：面板 HTML + 配置 CRUD + CF 配额
-internal/admin/web/          # 管理面板前端（go:embed 进二进制，改页面即生效）
-internal/cf/                 # Cloudflare 用量查询
+cmd/edge-balancer/   # 入口
+internal/config/     # 配置模型 + 校验
+internal/store/      # Turso(libSQL) 存储与迁移
+internal/cf/         # Cloudflare 用量查询（配额信号）
+internal/dns/        # DNS / Workers Route 切换
+internal/failover/   # 配额轮换状态机（队列指针 + 双信号 + 每日回切）
+internal/dataplane/  # 数据平面（旧转发模式，兼容保留）
+internal/admin/      # 管理面板（go:embed HTML + 配置 CRUD + 配额监控）
 ```
-
-数据平面不依赖控制平面与存储；控制平面通过依赖注入（回调）触发热加载，无反向依赖。
-
-## 工作原理
-
-```
-入站流量 → edge-balancer（按 Host 头选站点）
-              ├─ 未匹配域名 → 状态面板（管理入口）
-              ├─ 匹配站点 → 健康检查 + 选上游（priority 兜底 / least-conn / weighted）
-              └─ 反向代理：转发请求到选中的上游
-```
-
-- 灰度/切量 = 权重比例（`weight`），改配置 reload 即生效
-- 容灾 = 健康检查自动剔除故障上游，流量自动切到剩余健康上游
-- 内网上游（同机服务）直连 `127.0.0.1:<端口>`，可绕过公网 CDN/WAF（如 Cloudflare 托管质询）
-
-## Roadmap
-
-- [x] v1：加权分流 + 健康检查 + 自动剔除
-- [x] v2：状态面板（上游健康/统计/最近请求分发记录，`/admin`）
-- [x] v2.5：多域名路由（按 Host 头分发到各站点上游组）+ 管理入口
-- [x] v3：配置入库（Turso/libSQL）+ 管理页面 CRUD + 热加载（改配置即生效，不重启）
 
 ## License
 
