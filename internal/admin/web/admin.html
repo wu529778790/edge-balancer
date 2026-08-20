@@ -135,6 +135,26 @@ input:focus,select:focus{outline:2px solid var(--primary-soft);border-color:var(
 /* ---------- 响应式 ---------- */
 @media(max-width:1000px){.kpi-row{grid-template-columns:repeat(2,1fr)}.sidebar{width:72px}.logo-name,.logo-sub,.nav-item span,.nav-label,.nav-foot .u-name,.nav-foot .u-role{display:none}.nav-item{justify-content:center}.logo{justify-content:center;padding:20px 0}}
 @media(max-width:560px){.kpi-row{grid-template-columns:1fr}.content{padding:14px}.topbar{padding:0 14px}}
+
+/* ---------- 设计稿补充：分组 / chip 链 / 状态行 ---------- */
+.group-title{font-size:12px;color:var(--text-3);font-weight:500;margin:14px 0 8px;display:flex;align-items:center;gap:8px;letter-spacing:.02em}
+.group-title:first-child{margin-top:0}
+.group-title .sep{flex:1;height:1px;background:var(--border);margin-left:4px}
+.frm .row+.row{margin-top:6px}
+.queue{display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:500;border:1px solid var(--border-2);background:#fff;color:var(--text-2);white-space:nowrap;line-height:1.4}
+.chip-on{background:var(--primary);border-color:var(--primary);color:#fff;box-shadow:0 1px 3px rgba(79,70,229,.25)}
+.chip-fb{background:#F3F4F6;border-color:#E5E7EB;color:#6B7280}
+.chip-arr{color:var(--text-4);font-size:11px;margin:0 1px}
+.probe-stack{display:flex;flex-direction:column;gap:1px;font-size:12px;color:var(--text-2);line-height:1.5}
+.probe-stack .mode{color:var(--text-3);font-size:11.5px}
+.cf-status{font-size:12px;color:var(--ok-text);padding:10px 0 0;display:flex;align-items:center;gap:6px;border-top:1px solid var(--border);margin-top:8px}
+.cf-status .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);flex-shrink:0}
+.cf-status.warn{color:#B45309}.cf-status.warn .dot{background:var(--warn)}
+.cf-status.bad{color:var(--bad-text)}.cf-status.bad .dot{background:var(--bad)}
+.ops-right{text-align:right;white-space:nowrap}
+.ops-right .btn{margin-left:4px}
+.kpi-trend b{color:var(--text-2);font-weight:500}
 </style>
 </head>
 <body>
@@ -236,20 +256,24 @@ input:focus,select:focus{outline:2px solid var(--primary-soft);border-color:var(
         <div class="card">
           <div class="card-head"><h2>全局设置</h2><span class="hint">保存后 5 秒热加载生效</span></div>
           <div class="card-body">
-            <div class="frm"><div class="row">
-              <div><label>admin_token（面板访问 token，留空不鉴权）</label><input id="set-admin-token" size="24" placeholder="留空不鉴权"></div>
-              <div><label>健康检查间隔（秒）</label><input id="set-hi" size="6" type="number" value="10"></div>
-              <div><label>健康检查超时（秒）</label><input id="set-ht" size="6" type="number" value="5"></div>
-              <div><label>健康检查路径</label><input id="set-hp" size="12" value="/api/health"></div>
-              <div><label>默认均衡策略</label><select id="set-strategy"><option value="least-conn">least-conn</option><option value="weighted">weighted</option></select></div>
-              <div><label>上游转发超时（秒，超时自动熔断切换）</label><input id="set-ut" size="6" type="number" value="10"></div>
-              <div><label>DNS zone（直连模式域名所在 zone）</label><input id="set-dns-zone" size="12" placeholder="shenzjd.com"></div>
-              <div><label>DNS TTL（秒）</label><input id="set-dns-ttl" size="5" type="number" value="60"></div>
-              <div><label class="lbl-switch"><span class="switch"><input type="checkbox" id="set-dns-dry"><span class="sl"></span></span><span>DNS 监控模式（dry-run，只决策不切换）</span></label></div>
-              <div><label class="lbl-switch"><span class="switch"><input type="checkbox" id="set-rl" checked><span class="sl"></span></span><span>记录请求日志</span></label></div>
-              <button class="btn btn-p" onclick="saveSettings()">保存全局设置</button>
-            </div></div>
-            <div id="msg-settings"></div>
+            <div class="frm">
+              <div class="group-title">面板与健康探测<span class="sep"></span></div>
+              <div class="row">
+                <div><label>admin_token（面板访问 token，留空不鉴权）</label><input id="set-admin-token" size="24" placeholder="留空不鉴权"></div>
+                <div><label>健康检查间隔（秒）</label><input id="set-hi" size="6" type="number" value="10"></div>
+                <div><label>健康检查超时（秒）</label><input id="set-ht" size="6" type="number" value="5"></div>
+                <div><label>健康检查路径</label><input id="set-hp" size="12" value="/api/health"></div>
+                <div><label>上游转发超时（秒，超时自动熔断切换）</label><input id="set-ut" size="6" type="number" value="10"></div>
+              </div>
+              <div class="group-title">DNS 故障切换（failover）<span class="sep"></span></div>
+              <div class="row">
+                <div><label>DNS zone（直连模式域名所在 zone）</label><input id="set-dns-zone" size="12" placeholder="shenzjd.com"></div>
+                <div><label>DNS TTL（秒）</label><input id="set-dns-ttl" size="5" type="number" value="60"></div>
+                <div><label class="lbl-switch"><span class="switch"><input type="checkbox" id="set-dns-dry"><span class="sl"></span></span><span>DNS 监控模式（dry-run，只决策不切换）</span></label></div>
+                <button class="btn btn-p" onclick="saveSettings()">保存全局设置</button>
+              </div>
+            </div>
+            <div id="msg-settings" class="msg">全局设置已保存并生效</div>
           </div>
         </div>
 
@@ -277,6 +301,7 @@ input:focus,select:focus{outline:2px solid var(--primary-soft);border-color:var(
           </div>
           <div class="card-body">
             <div id="cf-list"></div>
+            <div id="cf-status"></div>
             <div id="msg-cf"></div>
           </div>
         </div>
@@ -365,19 +390,20 @@ function loadStatus(){
   Promise.all([api('/admin/api'), api('/admin/api/failover')]).then(function(res){
     var d=res[0]||{sites:[],time:'-'}, fo=Array.isArray(res[1])?res[1]:[];
     // KPI：直连站点 / 当前目标健康 / 已切到后继目标 / 最近切换
-    var curOk=0, onFallback=0, lastSwitch='暂无';
+    var curOk=0, onFallback=0, lastEv=null;
     fo.forEach(function(s){
       if(s.targets&&s.targets[s.current_index]&&s.targets[s.current_index].ok)curOk++;
       if(s.current_index>0)onFallback++;
-      if(s.events&&s.events.length){var e=s.events[s.events.length-1];lastSwitch=e.time+' '+e.from+'→'+e.to}
+      if(s.events&&s.events.length){var e=s.events[s.events.length-1];if(!lastEv||e.time>lastEv.time)lastEv=e}
     });
     document.getElementById('kpi-sites').textContent=fo.length;
-    document.getElementById('kpi-sites-t').textContent=fo.length?('DNS 直连站点 '+fo.length):'暂无直连站点';
+    document.getElementById('kpi-sites-t').textContent='DNS 故障切换管理';
     document.getElementById('kpi-health').textContent=curOk+' / '+fo.length;
     document.getElementById('kpi-health-t').textContent='当前目标实时探测';
     document.getElementById('kpi-total').textContent=onFallback;
-    document.getElementById('kpi-total-t').textContent=onFallback?('DNS 已切到后继目标'):'全部指向首个目标';
-    document.getElementById('kpi-flight').textContent=lastSwitch;
+    document.getElementById('kpi-total-t').textContent=onFallback?'DNS 当前指向备':'全部指向首个目标';
+    if(lastEv){document.getElementById('kpi-flight').textContent=lastEv.from+' → '+lastEv.to;document.getElementById('kpi-flight-t').textContent=lastEv.time+' · '+(lastEv.reason||'自动切换')}
+    else{document.getElementById('kpi-flight').textContent='-';document.getElementById('kpi-flight-t').textContent='最近一次 DNS 切换'}
     document.getElementById('meta').textContent='更新于 '+d.time;
     renderFailover(fo);
   }).catch(function(e){document.getElementById('meta').textContent='加载失败: '+e});
@@ -539,12 +565,10 @@ function loadSettings(){
     if(m['health_interval'])document.getElementById('set-hi').value=m['health_interval'];
     if(m['health_timeout'])document.getElementById('set-ht').value=m['health_timeout'];
     if(m['health_path'])document.getElementById('set-hp').value=m['health_path'];
-    if(m['strategy'])document.getElementById('set-strategy').value=m['strategy'];
     if(m['upstream_timeout'])document.getElementById('set-ut').value=m['upstream_timeout'];
     if(m['dns_zone'])document.getElementById('set-dns-zone').value=m['dns_zone'];
     if(m['dns_ttl'])document.getElementById('set-dns-ttl').value=m['dns_ttl'];
     document.getElementById('set-dns-dry').checked=m['dns_dry_run']==='1';
-    document.getElementById('set-rl').checked=m['request_log']!=='0';
   });
 }
 function saveSettings(){
@@ -553,12 +577,10 @@ function saveSettings(){
   body['health_interval']=document.getElementById('set-hi').value;
   body['health_timeout']=document.getElementById('set-ht').value;
   body['health_path']=document.getElementById('set-hp').value;
-  body['strategy']=document.getElementById('set-strategy').value;
   body['upstream_timeout']=document.getElementById('set-ut').value;
   body['dns_zone']=document.getElementById('set-dns-zone').value;
   body['dns_ttl']=document.getElementById('set-dns-ttl').value;
   body['dns_dry_run']=document.getElementById('set-dns-dry').checked?'1':'0';
-  body['request_log']=document.getElementById('set-rl').checked?'1':'0';
   api('/admin/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(){
     document.getElementById('msg-settings').className='msg';document.getElementById('msg-settings').textContent='全局设置已保存并生效';
   }).catch(function(e){document.getElementById('msg-settings').className='err';document.getElementById('msg-settings').textContent='保存失败: '+e});
@@ -573,18 +595,24 @@ var gFO=[];
 function loadFailoverSites(){
   api('/admin/api/failover/sites').then(function(list){
     gFO=list||[];
-    var html='<table><thead><tr><th>域名</th><th>目标队列（有序）</th><th>探测</th><th></th></tr></thead><tbody>';
+    var html='<table><thead><tr><th>域名</th><th style="width:42%">目标队列（有序：配额用尽/故障 → 切下一个）</th><th>探测</th><th class="ops-right">操作</th></tr></thead><tbody>';
     gFO.forEach(function(s){
       var ts=s.targets&&s.targets.length?s.targets:[];
       if(!ts.length&&s.primary_name)ts=[{name:s.primary_name,record_type:s.primary_record_type,dns_content:s.primary_dns_content,quota_account:''},{name:s.backup_name,record_type:s.backup_record_type,dns_content:s.backup_dns_content,quota_account:''}];
-      var ttxt=ts.map(function(t,i){
-        return (i===0?'':' → ')+esc(t.name)+(t.script?'['+esc(t.script)+']':'(服务器兜底)')+(t.quota_account?'[配额:'+esc(t.quota_account)+']':'');
+      var cur=s.current_index||0;
+      var chips=ts.map(function(t,i){
+        var isCur=i===cur;
+        var isFb=!t.quota_account && !t.script;
+        var cls='chip'+(isCur?' chip-on':(isFb?' chip-fb':''));
+        var suf=isCur?'（当前）':(isFb?'（兜底）':'');
+        return (i?'<span class="chip-arr">→</span>':'')+'<span class="'+cls+'">'+esc(t.name)+suf+'</span>';
       }).join('');
-      var rp=s.route_pattern?'<span class="code" style="color:var(--text-3)">route: '+esc(s.route_pattern)+'</span>':'';
-      html+='<tr><td>'+esc(s.domain)+' '+rp+'</td>'+
-        '<td class="code">'+ttxt+'</td>'+
-        '<td>'+esc(s.probe_mode)+' 每 '+s.probe_interval+'s</td>'+
-        '<td><button class="btn btn-sm" onclick="openFoModal('+s.id+')">编辑</button> <button class="btn btn-d btn-sm" onclick="delFo('+s.id+')">删除</button></td></tr>';
+      var rp=s.route_pattern?'<div class="probe-stack" style="margin-top:3px"><span class="mode">route: '+esc(s.route_pattern)+'</span></div>':'';
+      var probe='<div class="probe-stack"><span class="mode">'+esc(s.probe_mode||'server')+' · 每 '+esc(s.probe_interval||60)+'s</span><span>阈值 '+esc(s.probe_fail_threshold||3)+' / 冷却 '+esc(s.probe_cooldown||120)+'s</span></div>';
+      html+='<tr><td><div style="font-weight:600">'+esc(s.domain)+'</div>'+rp+'</td>'+
+        '<td><div class="queue">'+chips+'</div></td>'+
+        '<td>'+probe+'</td>'+
+        '<td class="ops-right"><button class="btn btn-sm" onclick="openFoModal('+s.id+')">编辑</button> <button class="btn btn-d btn-sm" onclick="delFo('+s.id+')">删除</button></td></tr>';
     });
     html+='</tbody></table>';
     document.getElementById('fo-sites').innerHTML=html||'<div class="empty">暂无直连站点，点「新增」</div>';
@@ -663,6 +691,9 @@ function delFo(id){
 
 /* ---------- Cloudflare 配额 ---------- */
 var gCF=[];
+var gCFLastCheck='';
+function pad2(n){return n<10?'0'+n:n}
+function nowHMS(){var d=new Date();return pad2(d.getHours())+':'+pad2(d.getMinutes())+':'+pad2(d.getSeconds())}
 function loadCF(){
   api('/admin/api/cf').then(function(d){
     gCF=d.accounts||[];
@@ -671,7 +702,7 @@ function loadCF(){
 }
 function renderCF(accounts,usages){
   usages=usages||[];
-  var html='<table><thead><tr><th>账号</th><th>Account ID</th><th>额度</th><th>阈值%</th><th>已用请求</th><th>使用率</th><th></th></tr></thead><tbody>';
+  var html='<table><thead><tr><th>账号</th><th>Account ID</th><th>额度（请求/天）</th><th>阈值%</th><th>已用请求</th><th>使用率</th><th class="ops-right"></th></tr></thead><tbody>';
   accounts.forEach(function(a,i){
     var u=null;for(var k=0;k<usages.length;k++){if(usages[k].name===a.name){u=usages[k];break}}
     u=u||{name:a.name,used:0,percent:0,over_limit:false,auto_off:false,error:null};
@@ -685,10 +716,31 @@ function renderCF(accounts,usages){
       '<td class="code">'+esc(a.account_id)+'</td><td>'+fmt(a.quota)+'</td><td>'+a.threshold+'</td>'+
       '<td class="code">'+(u.error?'-':fmt(u.used))+'</td>'+
       '<td><div style="display:flex;align-items:center;gap:8px"><div class="usage-bar"><i class="'+barCls+'" style="width:'+pct+'%"></i></div><span style="font-size:12px;color:var(--text-2)">'+(u.error?'-':u.percent.toFixed(1)+'%')+'</span></div></td>'+
-      '<td><button class="btn btn-sm" onclick="openCFModal('+i+')">编辑</button> <button class="btn btn-d btn-sm" onclick="delCFRow('+i+')">删除</button></td></tr>';
+      '<td class="ops-right"><button class="btn btn-sm" onclick="openCFModal('+i+')">编辑</button> <button class="btn btn-d btn-sm" onclick="delCFRow('+i+')">删除</button></td></tr>';
   });
   html+='</tbody></table>';
   document.getElementById('cf-list').innerHTML=html||'<div class="empty">未配置账号，点「新增账号」</div>';
+  renderCFStatus(accounts,usages);
+}
+function renderCFStatus(accounts,usages){
+  var el=document.getElementById('cf-status');
+  if(!el||!accounts||!accounts.length){if(el)el.innerHTML='';return}
+  usages=usages||[];
+  var err=0,over=0,autoOff=0;
+  for(var i=0;i<usages.length;i++){
+    var u=usages[i];
+    if(!accounts.some(function(a){return a.name===u.name}))continue;
+    if(u.error)err++;
+    else if(u.over_limit)over++;
+    else if(u.auto_off)autoOff++;
+  }
+  var cls='',txt='';
+  if(err){cls='bad';txt='查询失败 '+err+' 个账号'}
+  else if(over){cls='bad';txt=over+' 个账号超阈值，已自动切换兜底上游'}
+  else if(autoOff){cls='warn';txt=autoOff+' 个账号自动停用中'}
+  else{cls='';txt='配额正常，无切换动作'}
+  el.className='cf-status'+(cls?' '+cls:'');
+  el.innerHTML='<span class="dot"></span>'+txt+(gCFLastCheck?' · 上次检查 '+gCFLastCheck:'');
 }
 function openCFModal(i){
   var acc=i==null?null:gCF[i];
@@ -723,8 +775,8 @@ function checkCF(){
     if(d.actions&&d.actions.length){txt='执行: '+d.actions.join('；')}
     else{txt='配额正常，无切换动作'}
     document.getElementById('msg-cf').className='msg';document.getElementById('msg-cf').textContent=txt;
+    gCFLastCheck=nowHMS();
     renderCF(gCF, d.usages||[]);
-    loadConfig();
   }).catch(function(e){document.getElementById('msg-cf').className='err';document.getElementById('msg-cf').textContent='检查失败: '+e});
 }
 
