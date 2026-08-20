@@ -181,8 +181,7 @@ func (c *Client) GetRecord(zoneID, recordID string) (*Record, error) {
 }
 
 // PatchRecord 更新记录（type/content/ttl/proxied）。keepProxy 为 true 时保持原 proxied。
-func (c *Client) PatchRecord(zoneID, recordID, rtype, content string, ttl int, keepProxy bool) (*Record, error) {
-	cur, err := c.GetRecord(zoneID, recordID)
+func (c *Client) PatchRecord(zoneID, recordID, rtype, content string, ttl int, keepProxy bool) (*Record, error) {	cur, err := c.GetRecord(zoneID, recordID)
 	if err != nil {
 		return nil, err
 	}
@@ -274,4 +273,28 @@ func (c *Client) DeleteRoute(zoneID, pattern string) error {
 	}
 	_, err = c.do(http.MethodDelete, "/zones/"+zoneID+"/workers/routes/"+cur.ID, nil)
 	return err
+}
+
+// PatchRecordContent 按域名解析记录并 PATCH content（跨平台 DNS 目标切换用）。
+// proxied 保持原值（用户解析 IP 不变，切换秒级生效）；TTL 60s。
+func (c *Client) PatchRecordContent(zoneID, name, rtype, content string) error {
+	rid, err := c.RecordID(zoneID, name)
+	if err != nil {
+		return err
+	}
+	_, err = c.PatchRecord(zoneID, rid, rtype, content, 60, true)
+	return err
+}
+
+// CurrentDNSContent 读取域名当前记录 content（启动对齐 / 面板展示用）
+func (c *Client) CurrentDNSContent(zoneID, name string) (string, error) {
+	rid, err := c.RecordID(zoneID, name)
+	if err != nil {
+		return "", err
+	}
+	rec, err := c.GetRecord(zoneID, rid)
+	if err != nil {
+		return "", err
+	}
+	return rec.Content, nil
 }

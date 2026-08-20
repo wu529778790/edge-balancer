@@ -45,19 +45,23 @@ type SiteConfig struct {
 }
 
 // TargetConfig DNS 配额轮换队列中的一个目标。
-// QuotaAccount 非空时该目标受 CF 免费配额约束（引 cf_accounts 账号），配额超限自动切下一个；
+// QuotaAccount 非空时该目标受配额约束（引 cf_accounts 账号），配额超限自动切下一个；
 // 为空 = 无限额度兜底（如服务器 IP），只受健康约束。
 //
-// 切换语义（route 方案）：Script 非空的目标 = CF Worker（切换时把站点 RoutePattern 的 route 指向该 script，
-// 流量被 route 接管）；Script 为空的目标 = 服务器兜底（切换时删除 route，流量回源 DNS A 记录 → 服务器）。
+// 切换语义（三种动作，按字段自动推断）：
+//  1. Script 非空 = CF Worker（route 方案）：切换时把站点 RoutePattern 的 route 指向该 script，流量被 route 接管；
+//  2. Script 空 且 SetDNS=false = 服务器兜底（route 方案）：切换时删除 route，流量回源 DNS A 记录 → 服务器；
+//  3. Script 空 且 SetDNS=true = 任意 DNS 目标（跨平台）：切换时 PATCH DNS 记录为 RecordType+DNSContent
+//     （如 CNAME → Vercel/Netlify/Deno/EdgeOne 平台域名，或 A → 服务器 IP），route 需处于删除态。
 type TargetConfig struct {
 	Name         string `yaml:"name"`          // 目标名称（面板展示）
-	RecordType   string `yaml:"record_type"`   // 展示用：worker 通常 CNAME、服务器通常 A（不再 PATCH）
-	DNSContent   string `yaml:"dns_content"`   // 展示用：DNS 记录内容（route 方案下固定服务器 A 记录）
+	RecordType   string `yaml:"record_type"`   // DNS 记录类型（A/CNAME）；SetDNS 目标切换时 PATCH 用，其余为展示
+	DNSContent   string `yaml:"dns_content"`   // DNS 记录内容；SetDNS 目标切换时 PATCH 用，其余为展示
 	URL          string `yaml:"url"`           // 探测用 URL（服务器目标通常本地 http://127.0.0.1:<port>）
 	Health       string `yaml:"health"`        // 探测路径（默认用全局 health_path）
 	QuotaAccount string `yaml:"quota_account"` // 配额信号：引 cf_accounts 账号名；空=无限额度兜底
-	Script       string `yaml:"script"`        // CF Worker 名（非空 = worker 目标；空 = 服务器兜底）
+	Script       string `yaml:"script"`        // CF Worker 名（非空 = route 切换；空 = DNS 目标/服务器兜底）
+	SetDNS       bool   `yaml:"set_dns"`       // Script 空时：true = 切换 PATCH DNS 记录（跨平台 CNAME/A）；false = 删除 route 回源（服务器兜底）
 }
 
 // ProbeConfig 探测与切换防抖参数
@@ -95,15 +99,35 @@ type Config struct {
 	Sites          []SiteConfig `yaml:"sites"`           // 站点列表（按域名路由）
 }
 
-// CFAccount Cloudflare 账号配额配置（settings.cf_accounts 的 JSON 载体）。
+// CFAccount 配额账号配置（settings.cf_accounts 的 JSON 载体）。
 // Token 建议用 TokenEnv 从环境变量读取（不落盘）；Token 字段兼容旧数据（明文，弃用）。
+// Provider 区分配额来源平台（cloudflare/vercel/netlify/deno/edgeone/fastly…），
+// Period 表示配额周期（daily=每日 10 万/天；monthly=按自然月累计），轮换按各自周期回切。
 type CFAccount struct {
 	Name      string `json:"name"`
 	Token     string `json:"token"`     // 兼容旧字段（明文存储，弃用）；优先 token_env
-	TokenEnv  string `json:"token_env"` // 新：该账号配额查询 token 的环境变量名（如 CF_TOKEN_<NAME>）
+	TokenEnv  string `json:"token_env"` // 该账号配额查询 token 的环境变量名（如 CF_TOKEN_<NAME>）
 	AccountID string `json:"account_id"`
-	Quota     int64  `json:"quota"`     // 每日免费额度（请求数），默认 100000
+	Quota     int64  `json:"quota"`     // 周期内免费额度（请求数），默认 100000
 	Threshold int    `json:"threshold"` // 使用率阈值 %，默认 90
+	Provider  string `json:"provider"`  // 配额平台，默认 cloudflare（其他平台待适配）
+	Period    string `json:"period"`    // 配额周期，默认 daily（daily=每日 / monthly=自然月）
+}
+
+// NormalizeCFAccount 填充配额账号默认值（store/admin 读取后调用）。
+func NormalizeCFAccount(acc *CFAccount) {
+	if acc.Provider == "" {
+		acc.Provider = "cloudflare"
+	}
+	if acc.Period == "" {
+		acc.Period = "daily"
+	}
+	if acc.Quota <= 0 {
+		acc.Quota = 100000
+	}
+	if acc.Threshold <= 0 {
+		acc.Threshold = 90
+	}
 }
 
 // Normalize 填充默认值。文件模式与数据库模式共用。
@@ -183,6 +207,13 @@ func Normalize(cfg *Config) {
 				if t.RecordType == "" {
 					t.RecordType = "CNAME"
 				}
+				// SetDNS 目标（跨平台 DNS 切换）：Script 必须为空（DNS 记录与 route 互斥），RecordType 默认 CNAME
+				if t.SetDNS {
+					t.Script = ""
+					if t.RecordType == "" {
+						t.RecordType = "CNAME"
+					}
+				}
 			}
 		}
 		// 旧架构（转发）站点默认值
@@ -221,6 +252,9 @@ func Validate(cfg *Config) error {
 				}
 				if t.QuotaAccount != "" && t.RecordType == "" {
 					return fmt.Errorf("site %s 的 targets[%d] 缺少 record_type", site.Domain, j)
+				}
+				if t.SetDNS && t.Script != "" {
+					return fmt.Errorf("site %s 的 targets[%d] set_dns 目标不能同时配置 script（route 与 DNS 记录互斥）", site.Domain, j)
 				}
 			}
 			if len(site.Upstreams) > 0 {

@@ -73,11 +73,16 @@ type SiteStatus struct {
 	Events       []SwitchEvent  `json:"events"`
 }
 
-// Switcher route 切换接口（dns.Client 实现；测试可用 fake 替换，避免真调 CF API）
+// Switcher 切换接口（dns.Client 实现；测试可用 fake 替换，避免真调 CF API）。
+// route 切换：PutRoute/DeleteRoute（CF worker / 服务器兜底）；
+// DNS 记录切换：PatchRecordContent（跨平台 CNAME / 任意 DNS 目标）；
+// 当前状态读取：ListRoutes / CurrentDNSContent（启动对齐用）。
 type Switcher interface {
 	PutRoute(zoneID, pattern, script string) error
 	DeleteRoute(zoneID, pattern string) error
 	ListRoutes(zoneID string) ([]dns.WorkerRoute, error)
+	PatchRecordContent(zoneID, name, rtype, content string) error
+	CurrentDNSContent(zoneID, name string) (string, error)
 }
 
 // QuotaQuery 配额查询函数（真实实现 cf.QueryUsage；测试注入 fake）
@@ -100,6 +105,7 @@ type Site struct {
 	currentIndex int
 	manualIndex  int // StateManual 时锁定的目标下标；-1 未锁定
 	lastCheckDay string
+	lastCheckMon string
 
 	failStreak    int
 	cooldownUntil time.Time
@@ -141,6 +147,7 @@ func NewSite(domain, routePattern string, targets []config.TargetConfig, account
 		state:         StateAuto,
 		manualIndex:   -1,
 		lastCheckDay:  time.Now().Format("2006-01-02"), // 启动当天不触发每日回切扫描
+		lastCheckMon:  time.Now().Format("2006-01"),    // 启动当月不触发月度回切扫描
 		targetResults: results,
 		maxEvents:     50,
 	}, nil
@@ -296,16 +303,18 @@ func (s *Site) tick() {
 	}
 	s.refreshQuotas()
 
-	// 每日配额重置回切扫描
-	today := time.Now().Format("2006-01-02")
+	// 周期配额重置回切扫描（daily=每日零点 / monthly=每月 1 号零点）：
+	// 扫描队列切回「配额可用且健康」的最早目标，避免长期停留在后继目标。
+	now := time.Now()
+	today := now.Format("2006-01-02")
+	month := now.Format("2006-01")
 	if today != s.lastCheckDay {
 		s.lastCheckDay = today
-		if s.cooldownDone() {
-			if idx := s.firstAvailable(); idx >= 0 && idx != s.currentIndex {
-				s.doSwitch(idx, "auto", "每日配额重置，切回最早可用目标")
-				return
-			}
-		}
+		s.periodicReturn("每日配额重置")
+	}
+	if month != s.lastCheckMon {
+		s.lastCheckMon = month
+		s.periodicReturn("月度配额重置")
 	}
 
 	cur := &s.Targets[s.currentIndex]
@@ -341,6 +350,16 @@ func (s *Site) tick() {
 	}
 }
 
+// periodicReturn 周期配额重置回切扫描：切回最早「配额可用且健康」的目标
+func (s *Site) periodicReturn(reason string) {
+	if !s.cooldownDone() {
+		return
+	}
+	if idx := s.firstAvailable(); idx >= 0 && idx != s.currentIndex {
+		s.doSwitch(idx, "auto", reason+"，切回最早可用目标")
+	}
+}
+
 // cooldownDone 冷却是否已过
 func (s *Site) cooldownDone() bool {
 	return time.Now().After(s.cooldownUntil)
@@ -363,9 +382,20 @@ func (s *Site) doSwitch(index int, reason, detail string) error {
 	}
 
 	var err error
-	if target.Script != "" {
+	switch {
+	case target.Script != "":
+		// CF Worker：route 接管（流量被 route 指向 worker；route 优先级高于 DNS 记录）
 		err = s.client.PutRoute(s.zoneID, s.RoutePattern, target.Script)
-	} else {
+	case target.SetDNS:
+		// 跨平台 DNS 目标（CNAME→Vercel/Netlify/Deno/EdgeOne 等 / A→服务器 IP）：
+		// 先删 route（否则 route 仍接管流量到旧 worker），再 PATCH 记录 content
+		if derr := s.client.DeleteRoute(s.zoneID, s.RoutePattern); derr != nil {
+			err = derr
+		} else {
+			err = s.client.PatchRecordContent(s.zoneID, s.Domain, target.RecordType, target.DNSContent)
+		}
+	default:
+		// 服务器兜底（route 方案）：删除 route，流量回源 DNS A 记录 → 服务器
 		err = s.client.DeleteRoute(s.zoneID, s.RoutePattern)
 	}
 	if err != nil {
@@ -424,7 +454,9 @@ func (s *Site) currentRoute() (*dns.WorkerRoute, error) {
 	return nil, nil
 }
 
-// alignCurrent 按实际 route 指向对齐 currentIndex（启动/恢复自动用）
+// alignCurrent 按实际状态对齐 currentIndex（启动/恢复自动用）。
+// 顺序：① route 存在 → 匹配 Script 目标；② 无 route → 读 DNS 记录 content → 匹配 SetDNS 目标；
+// ③ 都不匹配 → 第一个 Script 空（服务器兜底），再兜底 index 0。
 func (s *Site) alignCurrent() error {
 	route, err := s.currentRoute()
 	if err != nil {
@@ -440,7 +472,17 @@ func (s *Site) alignCurrent() error {
 		s.currentIndex = 0
 		return nil
 	}
-	// 无 route → 服务器兜底（第一个 Script 为空的目标）
+	// 无 route：DNS 记录切换目标（SetDNS）对齐
+	if content, err := s.client.CurrentDNSContent(s.zoneID, s.Domain); err == nil && content != "" {
+		for i := range s.Targets {
+			t := &s.Targets[i]
+			if t.SetDNS && strings.EqualFold(t.DNSContent, content) {
+				s.currentIndex = i
+				return nil
+			}
+		}
+	}
+	// 服务器兜底（第一个 Script 为空的目标）
 	for i := range s.Targets {
 		if s.Targets[i].Script == "" {
 			s.currentIndex = i

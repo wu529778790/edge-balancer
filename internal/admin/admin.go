@@ -565,6 +565,7 @@ func (h *Handler) handleCFAPI(w http.ResponseWriter, r *http.Request, seg []stri
 		// 安全：token 明文不回传前端（只保留 token_env 环境变量名）
 		safe := make([]config.CFAccount, len(accounts))
 		for i, a := range accounts {
+			config.NormalizeCFAccount(&a)
 			a.Token = ""
 			safe[i] = a
 		}
@@ -585,6 +586,9 @@ func (h *Handler) handleCFAPI(w http.ResponseWriter, r *http.Request, seg []stri
 		if err := json.NewDecoder(r.Body).Decode(&accounts); err != nil {
 			http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
 			return
+		}
+		for i := range accounts {
+			config.NormalizeCFAccount(&accounts[i])
 		}
 		if err := h.store.SetCFAccounts(accounts); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)

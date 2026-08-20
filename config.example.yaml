@@ -37,19 +37,25 @@ dns:
   token_env: "CF_API_TOKEN"      # DNS 切换 token 环境变量名（权限：Zone.Zone:Read + Zone.DNS:Read + Zone.DNS:Edit）
   dry_run: true                  # true=监控模式：自动切换只决策不实际 PATCH（上线观察期用）；验证准确后改 false
 
-# ---------- CF 配额账号池（新架构：每个 worker 账号一条） ----------
-# token 不落盘：通过 token_env 从环境变量读取（如 CF_TOKEN_SHENZJD），权限需含 Account Analytics:Read
+# ---------- 配额账号池（新架构：每个平台账号一条） ----------
+# token 不落盘：通过 token_env 从环境变量读取（如 CF_TOKEN_SHENZJD），权限需含用量查询 API
+# provider：配额平台（cloudflare 已支持；edgeone/deno/netlify/vercel/fastly 架构就绪待接入）
+# period：配额周期（daily=每日 10 万/天；monthly=按自然月累计，如 EdgeOne 300 万/月）
 cf_accounts:
   - name: "shenzjd"              # 与站点 target 的 quota_account 对应
     account_id: "your-account-id-a"
-    quota: 100000                # 每日免费额度（请求数）
+    quota: 100000                # 周期内免费额度（请求数）
     threshold: 90                # 使用率 ≥90% 判超限（预留切换余量）
     token_env: "CF_TOKEN_SHENZJD"
-  - name: "2509818162"
-    account_id: "your-account-id-b"
-    quota: 100000
+    provider: "cloudflare"       # 默认 cloudflare
+    period: "daily"              # 默认 daily
+  - name: "edgeone-a"
+    account_id: "your-account-id"
+    quota: 3000000               # EdgeOne 免费版 300 万/月
     threshold: 90
-    token_env: "CF_TOKEN_2509818162"
+    token_env: "EDGEONE_TOKEN"
+    provider: "edgeone"          # 待接入（当前返回"未适配"）
+    period: "monthly"
 
 sites:
   # ---- 直连模式站点示例（新架构）：目标队列按顺序消费配额，末位为兜底 ----
@@ -61,11 +67,12 @@ sites:
         url: "https://parse-shenzjd-com.shenzjd.workers.dev"   # 探测用 URL（服务器侧）
         health: "/api/health"                # 探测路径（默认用全局 health_path）
         quota_account: "shenzjd"             # 配额信号：引 cf_accounts 账号
-      - name: "worker-b"                     # 第二个 worker（另一 CF 账号，配额独立）
+      - name: "edgeone"                      # 跨平台 DNS 目标（set_dns=true：切换 PATCH 记录为 CNAME）
         record_type: "CNAME"
-        dns_content: "parse-shenzjd-com.2509818162.workers.dev"
-        url: "https://parse-shenzjd-com.2509818162.workers.dev"
-        quota_account: "2509818162"
+        dns_content: "parse.shenzjd.com.edgeone.app"   # 切到该目标时 DNS 记录 content 变为此值
+        url: "https://parse.shenzjd.com.edgeone.app"   # 探测用 URL
+        quota_account: "edgeone-a"           # 配额信号：引 cf_accounts 账号（EdgeOne 300 万/月）
+        set_dns: true                        # 关键：DNS 记录切换（route 与 DNS 目标互斥）
       - name: "server"                       # 末位：服务器兜底（无 quota_account = 无限额度）
         record_type: "A"
         dns_content: "43.128.70.75"

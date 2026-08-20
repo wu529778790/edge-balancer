@@ -24,11 +24,24 @@ type Usage struct {
 	Error     string  `json:"error,omitempty"`
 }
 
-// QueryUsage 查询单个账号当天 Workers 请求数（GraphQL Analytics API）
-// 免费版限额 100,000 请求/天（非每月）；查 date_geq/date_leq = 今天
-// 注意：字段名为 workersInvocationsAdaptive（无 Groups 后缀，文档有误）
-// token 来源：优先 acc.TokenEnv 指定的环境变量（推荐，不落盘），回退 acc.Token（旧明文字段）
+// QueryUsage 查询单个配额账号当前周期的用量（GraphQL Analytics API）。
+// 免费版限额 100,000 请求/天（非每月）；Period=daily 查当天，monthly 查当月累计（date_geq=当月 1 号）。
+// 注意：字段名为 workersInvocationsAdaptive（无 Groups 后缀，文档有误）。
+// Provider=cloudflare 走 GraphQL；其他平台（vercel/netlify/deno/edgeone/fastly）架构已就绪但未接入，
+// 返回明确错误，面板显示"查询失败: provider xxx 未适配"。
+// token 来源：优先 acc.TokenEnv 指定的环境变量（推荐，不落盘），回退 acc.Token（旧明文字段）。
 func QueryUsage(acc config.CFAccount) (Usage, error) {
+	config.NormalizeCFAccount(&acc)
+	switch acc.Provider {
+	case "", "cloudflare":
+		return queryCloudflare(acc)
+	default:
+		return Usage{}, fmt.Errorf("provider %s 未适配（架构已就绪，待接入该平台用量 API）", acc.Provider)
+	}
+}
+
+// queryCloudflare CF 平台用量查询（GraphQL Analytics）
+func queryCloudflare(acc config.CFAccount) (Usage, error) {
 	token := acc.Token
 	if acc.TokenEnv != "" {
 		if v := os.Getenv(acc.TokenEnv); v != "" {
@@ -39,21 +52,12 @@ func QueryUsage(acc config.CFAccount) (Usage, error) {
 		return Usage{}, fmt.Errorf("账号 %s 未配置 token（TokenEnv 环境变量 %q 或 Token 字段）", acc.Name, acc.TokenEnv)
 	}
 
-	quota := acc.Quota
-	if quota <= 0 {
-		quota = 100000
-	}
-	threshold := acc.Threshold
-	if threshold <= 0 {
-		threshold = 90
-	}
-
 	now := time.Now()
-	today := now.Format("2006-01-02")
+	from, to := periodRange(acc.Period, now)
 
 	query := fmt.Sprintf(
 		`query { viewer { accounts(filter: {accountTag: "%s"}) { workersInvocationsAdaptive(limit: 1, filter: {date_geq: "%s", date_leq: "%s"}) { sum { requests } } } } }`,
-		acc.AccountID, today, today)
+		acc.AccountID, from, to)
 
 	payload, _ := json.Marshal(map[string]string{"query": query})
 	req, err := http.NewRequest(http.MethodPost, "https://api.cloudflare.com/client/v4/graphql", bytes.NewReader(payload))
@@ -101,14 +105,26 @@ func QueryUsage(acc config.CFAccount) (Usage, error) {
 	if len(parsed.Data.Viewer.Accounts) > 0 && len(parsed.Data.Viewer.Accounts[0].WorkersInvocations) > 0 {
 		used = parsed.Data.Viewer.Accounts[0].WorkersInvocations[0].Sum.Requests
 	}
-	percent := float64(used) / float64(quota) * 100
+	percent := float64(used) / float64(acc.Quota) * 100
 	return Usage{
 		Name:      acc.Name,
 		Used:      used,
-		Quota:     quota,
+		Quota:     acc.Quota,
 		Percent:   percent,
-		OverLimit: percent >= float64(threshold),
+		OverLimit: percent >= float64(acc.Threshold),
 	}, nil
+}
+
+// periodRange 按周期计算查询窗口（date_geq / date_leq）
+func periodRange(period string, now time.Time) (string, string) {
+	to := now.Format("2006-01-02")
+	switch period {
+	case "monthly":
+		from := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location()).Format("2006-01-02")
+		return from, to
+	default: // daily
+		return to, to
+	}
 }
 
 // QueryAllUsages 并发查询所有账号用量

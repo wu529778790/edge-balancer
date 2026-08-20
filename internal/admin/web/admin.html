@@ -620,13 +620,18 @@ function loadFailoverSites(){
 }
 function foTargetRow(t){
   t=t||{};
-  return '<div class="fo-tr" style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:6px;display:grid;grid-template-columns:1fr 90px 1fr;gap:6px">'+
+  return '<div class="fo-tr" style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:6px;display:grid;grid-template-columns:1fr 90px 1.2fr 1fr;gap:6px">'+
     '<input class="fo-name" placeholder="名称（如 worker-a）" value="'+esc(t.name||'')+'">'+
+    '<select class="fo-type">'+
+      '<option value="route">CF Worker</option>'+
+      '<option value="dns"'+(t.set_dns?' selected':'')+'>DNS 记录</option>'+
+      '<option value="server"'+(!t.set_dns&&!t.script?' selected':'')+'>服务器兜底</option>'+
+    '</select>'+
+    '<input class="fo-script" placeholder="Worker 名（route 切换）" value="'+esc(t.script||'')+'">'+
+    '<input class="fo-dns" placeholder="DNS 值（A→IP / CNAME→平台域名）" value="'+esc(t.dns_content||'')+'">'+
     '<select class="fo-rt"><option value="CNAME"'+(t.record_type==='A'?'':' selected')+'>CNAME</option><option value="A"'+(t.record_type==='A'?' selected':'')+'>A</option></select>'+
-    '<input class="fo-dns" placeholder="DNS 展示值（A→43.128.70.75）" value="'+esc(t.dns_content||'')+'">'+
-    '<input class="fo-url" placeholder="探测 URL（https://xxx.workers.dev / http://127.0.0.1:5269）" value="'+esc(t.url||'')+'">'+
+    '<input class="fo-url" placeholder="探测 URL（https://xxx / http://127.0.0.1:5269）" value="'+esc(t.url||'')+'">'+
     '<input class="fo-health" placeholder="探测路径（默认 /api/health）" value="'+esc(t.health||'')+'">'+
-    '<input class="fo-script" placeholder="CF Worker 名（留空=服务器兜底）" value="'+esc(t.script||'')+'">'+
     '<div style="display:flex;gap:6px"><input class="fo-quota" placeholder="配额账号（留空=无限额度）" value="'+esc(t.quota_account||'')+'" style="flex:1">'+
     '<button class="btn btn-d btn-sm" onclick="delFoTarget(this)">删</button></div></div>';
 }
@@ -635,7 +640,11 @@ function delFoTarget(btn){var box=document.getElementById('fo-targets');if(box.c
 function readFoTargets(){
   var out=[];
   document.querySelectorAll('#fo-targets .fo-tr').forEach(function(tr){
-    var t={name:tr.querySelector('.fo-name').value.trim(),record_type:tr.querySelector('.fo-rt').value,dns_content:tr.querySelector('.fo-dns').value.trim(),url:tr.querySelector('.fo-url').value.trim(),health:tr.querySelector('.fo-health').value.trim(),script:tr.querySelector('.fo-script').value.trim(),quota_account:tr.querySelector('.fo-quota').value.trim()};
+    var type=tr.querySelector('.fo-type').value;
+    var t={name:tr.querySelector('.fo-name').value.trim(),record_type:tr.querySelector('.fo-rt').value,dns_content:tr.querySelector('.fo-dns').value.trim(),url:tr.querySelector('.fo-url').value.trim(),health:tr.querySelector('.fo-health').value.trim(),quota_account:tr.querySelector('.fo-quota').value.trim()};
+    if(type==='route'){t.script=tr.querySelector('.fo-script').value.trim();t.set_dns=false}
+    else if(type==='dns'){t.script='';t.set_dns=true}
+    else{t.script='';t.set_dns=false}
     if(t.name&&t.dns_content)out.push(t);
   });
   return out;
@@ -668,7 +677,7 @@ function openFoModal(id){
       closeModal();loadFailoverSites();
     }).catch(function(e){alert('保存失败: '+e)});
   });
-  var ed='<div class="m-field"><label>目标队列（有序：配额用尽 / 故障 → 切下一个；末位无 script = 服务器兜底）</label>'+
+  var ed='<div class="m-field"><label>目标队列（有序：配额用尽 / 故障 → 切下一个；类型：CF Worker=route 接管 / DNS 记录=跨平台 CNAME·A PATCH / 服务器兜底=删 route 回源）</label>'+
     '<div id="fo-targets"></div><button class="btn btn-sm" onclick="addFoTarget()" style="margin-top:4px">+ 添加目标</button></div>';
   document.getElementById('modal-body').insertAdjacentHTML('beforeend',ed);
   targets.forEach(function(){addFoTarget()});
@@ -680,6 +689,10 @@ function openFoModal(id){
     tr.querySelector('.fo-url').value=t.url||'';
     tr.querySelector('.fo-health').value=t.health||'';
     tr.querySelector('.fo-script').value=t.script||'';
+    var ftype=tr.querySelector('.fo-type');
+    if(t.set_dns)ftype.value='dns';
+    else if(t.script)ftype.value='route';
+    else ftype.value='server';
     tr.querySelector('.fo-quota').value=t.quota_account||'';
   });
 }
@@ -702,7 +715,7 @@ function loadCF(){
 }
 function renderCF(accounts,usages){
   usages=usages||[];
-  var html='<table><thead><tr><th>账号</th><th>Account ID</th><th>额度（请求/天）</th><th>阈值%</th><th>已用请求</th><th>使用率</th><th class="ops-right"></th></tr></thead><tbody>';
+  var html='<table><thead><tr><th>账号</th><th>平台/周期</th><th>Account ID</th><th>额度（周期内）</th><th>阈值%</th><th>已用请求</th><th>使用率</th><th class="ops-right"></th></tr></thead><tbody>';
   accounts.forEach(function(a,i){
     var u=null;for(var k=0;k<usages.length;k++){if(usages[k].name===a.name){u=usages[k];break}}
     u=u||{name:a.name,used:0,percent:0,over_limit:false,auto_off:false,error:null};
@@ -712,7 +725,9 @@ function renderCF(accounts,usages){
     else if(u.auto_off){st='自动停用中';cls='warn';pct=Math.min(u.percent,100)}
     else{st='正常';cls='ok';pct=Math.min(u.percent,100)}
     var barCls=(u.over_limit?'bad':(pct>=(a.threshold||90)?'warn':''));
+    var plat=esc(a.provider||'cloudflare')+' · '+esc(a.period||'daily');
     html+='<tr><td>'+esc(a.name)+' '+(st?'<span class="badge '+cls+'" style="margin-left:6px"><span class="dot"></span>'+st+'</span>':'')+'</td>'+
+      '<td class="code" style="font-size:11.5px">'+plat+'</td>'+
       '<td class="code">'+esc(a.account_id)+'</td><td>'+fmt(a.quota)+'</td><td>'+a.threshold+'</td>'+
       '<td class="code">'+(u.error?'-':fmt(u.used))+'</td>'+
       '<td><div style="display:flex;align-items:center;gap:8px"><div class="usage-bar"><i class="'+barCls+'" style="width:'+pct+'%"></i></div><span style="font-size:12px;color:var(--text-2)">'+(u.error?'-':u.percent.toFixed(1)+'%')+'</span></div></td>'+
@@ -746,12 +761,14 @@ function openCFModal(i){
   var acc=i==null?null:gCF[i];
   openModal(acc?'编辑账号':'新增账号',[
     {key:'name',label:'账号名',placeholder:'账号A（与站点 target 的 quota_account 对应）'},
+    {key:'provider',label:'配额平台',type:'select',options:[{v:'cloudflare',l:'cloudflare（Workers，已支持）'},{v:'edgeone',l:'edgeone（腾讯云，待适配）'},{v:'deno',l:'deno（Deno Deploy，待适配）'},{v:'netlify',l:'netlify（待适配）'},{v:'vercel',l:'vercel（待适配）'},{v:'fastly',l:'fastly（待适配）'}]},
+    {key:'period',label:'配额周期',type:'select',options:[{v:'daily',l:'daily（每日，如 CF 10 万/天）'},{v:'monthly',l:'monthly（自然月累计）'}]},
     {key:'token_env',label:'Token 环境变量名',placeholder:'如 CF_TOKEN_SHENZJD（推荐，不落盘）'},
-    {key:'account_id',label:'Account ID',placeholder:'CF Account ID'},
-    {key:'quota',label:'每日免费额度（请求数）',type:'number'},
+    {key:'account_id',label:'Account ID',placeholder:'平台账号 ID'},
+    {key:'quota',label:'周期内免费额度（请求数）',type:'number'},
     {key:'threshold',label:'阈值 %',type:'number'}
   ],acc,function(){
-    var a={name:mval('name'),token:'',token_env:mval('token_env'),account_id:mval('account_id'),quota:+mval('quota')||100000,threshold:+mval('threshold')||90};
+    var a={name:mval('name'),token:'',token_env:mval('token_env'),account_id:mval('account_id'),quota:+mval('quota')||100000,threshold:+mval('threshold')||90,provider:mval('provider'),period:mval('period')};
     if(!a.name){alert('账号名不能为空');return}
     if(i==null)gCF.push(a);else gCF[i]=a;
     saveCF();

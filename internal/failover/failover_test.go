@@ -14,13 +14,16 @@ import (
 	"github.com/wu529778790/edge-balancer/internal/dns"
 )
 
-// fakeSwitcher 模拟 Workers Route 操作（不真调 CF API）；可注入错误模拟切换失败
+// fakeSwitcher 模拟 Workers Route / DNS 记录操作（不真调 CF API）；可注入错误模拟切换失败
 type fakeSwitcher struct {
 	route   *dns.WorkerRoute // 当前存在的 route（pattern 匹配）
 	putCalls int32
 	delCalls int32
 	putErr   error
 	delErr   error
+	dnsContent string // 当前 DNS 记录 content（SetDNS 目标切换用）
+	patchErr   error
+	patchCalls int32
 }
 
 func (f *fakeSwitcher) ListRoutes(zoneID string) ([]dns.WorkerRoute, error) {
@@ -46,6 +49,19 @@ func (f *fakeSwitcher) DeleteRoute(zoneID, pattern string) error {
 	}
 	f.route = nil
 	return nil
+}
+
+func (f *fakeSwitcher) PatchRecordContent(zoneID, name, rtype, content string) error {
+	atomic.AddInt32(&f.patchCalls, 1)
+	if f.patchErr != nil {
+		return f.patchErr
+	}
+	f.dnsContent = content
+	return nil
+}
+
+func (f *fakeSwitcher) CurrentDNSContent(zoneID, name string) (string, error) {
+	return f.dnsContent, nil
 }
 
 // fakeQuota 可控配额查询（按账号名）
@@ -506,5 +522,93 @@ func TestBuildSitesEmpty(t *testing.T) {
 	}
 	if len(sites) != 0 {
 		t.Fatalf("应返回空，实际 %d 个", len(sites))
+	}
+}
+
+// mkSiteDNS 跨平台目标队列：worker-a（route）+ edgeone（SetDNS CNAME）+ server（SetDNS A）
+func mkSiteDNS(sw Switcher, q QuotaQuery) *Site {
+	up := upSrv()
+	targets := []config.TargetConfig{
+		{Name: "worker-a", RecordType: "CNAME", DNSContent: "a.workers.dev", URL: "http://127.0.0.1:9", Health: "/api/health", QuotaAccount: "accA", Script: "worker-a-script"},
+		{Name: "edgeone", RecordType: "CNAME", DNSContent: "edgeone.example.com", URL: up.URL, Health: "/api/health", QuotaAccount: "accEO", SetDNS: true},
+		{Name: "server", RecordType: "A", DNSContent: "1.2.3.4", URL: up.URL, Health: "/api/health", SetDNS: true},
+	}
+	accounts := []config.CFAccount{
+		{Name: "accA", Quota: 100000, Threshold: 90},
+		{Name: "accEO", Quota: 3000000, Threshold: 90},
+	}
+	s, err := NewSite("a.test", "a.test/*", targets, accounts, config.ProbeConfig{Mode: "server", Interval: 60, Timeout: 3, FailThreshold: 2, Cooldown: 0, QuotaInterval: 0}, sw, "zone1", false, q)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+// SetDNS 目标：配额超限依次切 worker-a → edgeone(CNAME) → server(A)，DNS 记录 content 随之变化
+func TestDNSSwitchTarget(t *testing.T) {
+	sw := &fakeSwitcher{route: &dns.WorkerRoute{ID: "r1", Pattern: "a.test/*", Script: "worker-a-script"}}
+	q := &fakeQuota{usages: map[string]cf.Usage{}}
+	s := mkSiteDNS(sw, q.query)
+	if err := s.SyncActual(); err != nil {
+		t.Fatal(err)
+	}
+	if s.currentIndex != 0 {
+		t.Fatalf("启动应对齐 worker-a（route 存在），实际 %d", s.currentIndex)
+	}
+
+	// accA 配额超限 → 切 edgeone（SetDNS：PATCH CNAME）
+	q.usages["accA"] = cf.Usage{Name: "accA", Used: 90000, Quota: 100000, Percent: 90, OverLimit: true}
+	s.mu.Lock()
+	s.tick()
+	s.mu.Unlock()
+	if s.currentIndex != 1 {
+		t.Fatalf("配额超限应切到 edgeone，实际 index %d", s.currentIndex)
+	}
+	if sw.dnsContent != "edgeone.example.com" {
+		t.Fatalf("edgeone 应 PATCH DNS CNAME，实际 content %q", sw.dnsContent)
+	}
+
+	// accEO 也超限 → 切 server（SetDNS：PATCH A）
+	q.usages["accEO"] = cf.Usage{Name: "accEO", Used: 2700000, Quota: 3000000, Percent: 90, OverLimit: true}
+	s.mu.Lock()
+	s.tick()
+	s.mu.Unlock()
+	if s.currentIndex != 2 {
+		t.Fatalf("edgeone 超限应切到 server，实际 index %d", s.currentIndex)
+	}
+	if sw.dnsContent != "1.2.3.4" {
+		t.Fatalf("server 应 PATCH DNS A，实际 content %q", sw.dnsContent)
+	}
+	if sw.route != nil {
+		t.Fatalf("DNS 目标切换时 route 应保持删除态")
+	}
+}
+
+// 月度配额重置回切：跨月后扫描切回最早可用目标
+func TestMonthlyPeriodReturn(t *testing.T) {
+	sw := &fakeSwitcher{} // 无 route → 对齐到第一个 Script 空（edgeone，index 1）
+	q := &fakeQuota{usages: map[string]cf.Usage{}}
+	s := mkSiteDNS(sw, q.query)
+	if err := s.SyncActual(); err != nil {
+		t.Fatal(err)
+	}
+	if s.currentIndex != 1 {
+		t.Fatalf("无 route 应对齐第一个 Script 空目标（edgeone），实际 %d", s.currentIndex)
+	}
+
+	// 模拟跨月：lastCheckMon 置为上月；accA 配额已重置（未超限）
+	s.lastCheckMon = "2000-01"
+	q.usages["accA"] = cf.Usage{Name: "accA", Used: 0, Quota: 100000, Percent: 0}
+	q.usages["accEO"] = cf.Usage{Name: "accEO", Used: 0, Quota: 3000000, Percent: 0}
+
+	// worker-a 探测会失败（127.0.0.1:9 无服务）→ firstAvailable 跳过 → 保持当前
+	s.mu.Lock()
+	s.tick()
+	s.mu.Unlock()
+	if s.currentIndex != 1 {
+		t.Fatalf("worker-a 不健康时不应回切，实际 %d", s.currentIndex)
+	}
+	if s.lastCheckMon == "2000-01" {
+		t.Fatalf("lastCheckMon 应已更新")
 	}
 }
