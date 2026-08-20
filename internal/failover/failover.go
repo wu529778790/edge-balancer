@@ -1,7 +1,9 @@
-// Package failover DNS 故障切换状态机（新架构控制面核心）。
+// Package failover DNS 配额轮换状态机（新架构控制面核心）。
 //
-// 职责：按探测间隔检查每站主/备目标健康，主连续失败则调 Cloudflare DNS API
-// 把记录切到备，主恢复稳定后切回；支持手动接管与切换历史。数据面不经过本包。
+// 职责：每站维护一个有序目标队列（worker A → worker B → 服务器兜底），
+// 双信号驱动切换：配额信号（CF 免费 10 万请求/天/账号，用尽自动切下一个）为主，
+// 健康信号（连接拒绝/4xx/5xx 连续失败）为辅；配额每日重置后自动切回最早可用目标。
+// 数据面不经过本包。
 package failover
 
 import (
@@ -15,17 +17,17 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wu529778790/edge-balancer/internal/cf"
 	"github.com/wu529778790/edge-balancer/internal/config"
 	"github.com/wu529778790/edge-balancer/internal/dns"
 )
 
-// State 站点切换状态
+// State 站点状态
 type State string
 
 const (
-	StateActive     State = "active"      // DNS 指向主
-	StateFailedOver State = "failed_over" // DNS 指向备
-	StateManual     State = "manual"      // 手动接管（不自动切换）
+	StateAuto   State = "auto"   // 自动模式（队列按信号推进）
+	StateManual State = "manual" // 手动锁定（不自动切换）
 )
 
 // SwitchEvent 一次切换记录
@@ -33,29 +35,35 @@ type SwitchEvent struct {
 	Time   string `json:"time"`
 	From   string `json:"from"`
 	To     string `json:"to"`
-	Reason string `json:"reason"` // auto / manual
+	Reason string `json:"reason"` // auto / quota / manual
 	Detail string `json:"detail"`
 }
 
-// TargetStatus 单个目标的探测状态（面板）
+// TargetStatus 单个目标的探测 + 配额状态（面板）
 type TargetStatus struct {
-	Name       string `json:"name"`
-	OK         bool   `json:"ok"`
-	Latency    string `json:"latency"`
-	Detail     string `json:"detail"`
-	RecordType string `json:"record_type"`
-	DNSContent string `json:"dns_content"`
+	Name         string  `json:"name"`
+	RecordType   string  `json:"record_type"`
+	DNSContent   string  `json:"dns_content"`
+	OK           bool    `json:"ok"`
+	Latency      string  `json:"latency"`
+	Detail       string  `json:"detail"`
+	QuotaAccount string  `json:"quota_account,omitempty"` // 空=无限额度兜底
+	QuotaUsed    int64   `json:"quota_used,omitempty"`
+	QuotaLimit   int64   `json:"quota_limit,omitempty"`
+	QuotaPercent float64 `json:"quota_percent,omitempty"`
+	QuotaOver    bool    `json:"quota_over,omitempty"`
+	QuotaError   string  `json:"quota_error,omitempty"`
 }
 
 // SiteStatus 单站状态快照（面板）
 type SiteStatus struct {
-	Domain       string        `json:"domain"`
-	State        State         `json:"state"`
-	ManualTarget string        `json:"manual_target"`
-	Primary      TargetStatus  `json:"primary"`
-	Backup       TargetStatus  `json:"backup"`
-	CooldownLeft int           `json:"cooldown_left"`
-	Events       []SwitchEvent `json:"events"`
+	Domain       string         `json:"domain"`
+	State        State          `json:"state"`
+	Current      string         `json:"current"` // 当前 DNS 指向的目标名
+	CurrentIndex int            `json:"current_index"`
+	Targets      []TargetStatus `json:"targets"`
+	CooldownLeft int            `json:"cooldown_left"`
+	Events       []SwitchEvent  `json:"events"`
 }
 
 // Switcher DNS 记录读写接口（dns.Client 实现；测试可用 fake 替换，避免真调 CF API）
@@ -64,61 +72,89 @@ type Switcher interface {
 	GetRecord(zoneID, recordID string) (*dns.Record, error)
 }
 
-// Site 单站故障切换运行实例
+// QuotaQuery 配额查询函数（真实实现 cf.QueryUsage；测试注入 fake）
+type QuotaQuery func(acc config.CFAccount) (cf.Usage, error)
+
+// Site 单站配额轮换运行实例
 type Site struct {
 	Domain   string
-	Primary  config.TargetConfig
-	Backup   config.TargetConfig
+	Targets  []config.TargetConfig
 	Probe    config.ProbeConfig
+	Accounts []config.CFAccount // 配额账号池（按 Name 查找）
 	dnsTTL   int
 	zoneID   string
 	recordID string
 	client   Switcher
-	dryRun   bool // 监控模式：决策正常执行，但不实际调用 CF API 切换
+	dryRun   bool // 监控模式：自动切换只决策不 PATCH；手动切换放行
+	quota    QuotaQuery
 
 	mu           sync.Mutex
 	state        State
-	manualTarget string // StateManual 时指定指向（primary/backup）
+	currentIndex int
+	manualIndex  int // StateManual 时锁定的目标下标；-1 未锁定
+	lastCheckDay string
 
-	failStreak      int // 当前主连续失败次数
-	okStreak        int // 备状态时主连续成功次数（判恢复）
-	backupFailStreak int // 备状态时备连续失败次数
-	cooldownUntil   time.Time
+	failStreak    int
+	cooldownUntil time.Time
+	lastQuotaAt   time.Time
 
-	primaryResult TargetStatus
-	backupResult  TargetStatus
+	targetResults []TargetStatus
 	events        []SwitchEvent
 	maxEvents     int
 }
 
 // NewSite 构造单站。recordID 由 Manager 注入（构造时解析并缓存）。
-// dryRun=true 时进入监控模式：探测与决策照常，但不实际切换 DNS。
-func NewSite(domain string, primary, backup config.TargetConfig, probe config.ProbeConfig, client Switcher, zoneID, recordID string, dnsTTL int, dryRun bool) (*Site, error) {
+// dryRun=true 时进入监控模式：探测与决策照常，自动切换不实际 PATCH。
+func NewSite(domain string, targets []config.TargetConfig, accounts []config.CFAccount, probe config.ProbeConfig, client Switcher, zoneID, recordID string, dnsTTL int, dryRun bool, quota QuotaQuery) (*Site, error) {
 	if client == nil {
 		return nil, fmt.Errorf("site %s: dns client 未初始化", domain)
 	}
 	if zoneID == "" || recordID == "" {
 		return nil, fmt.Errorf("site %s: zone_id / record_id 未解析", domain)
 	}
+	if len(targets) < 2 {
+		return nil, fmt.Errorf("site %s: 至少配置 2 个 targets", domain)
+	}
+	if quota == nil {
+		quota = cf.QueryUsage
+	}
+	results := make([]TargetStatus, len(targets))
+	for i, t := range targets {
+		results[i] = TargetStatus{Name: t.Name, RecordType: t.RecordType, DNSContent: t.DNSContent, QuotaAccount: t.QuotaAccount}
+	}
 	return &Site{
-		Domain:     domain,
-		Primary:    primary,
-		Backup:     backup,
-		Probe:      probe,
-		dnsTTL:     dnsTTL,
-		zoneID:     zoneID,
-		recordID:   recordID,
-		client:     client,
-		dryRun:     dryRun,
-		state:      StateActive,
-		maxEvents:  50,
+		Domain:        domain,
+		Targets:       targets,
+		Accounts:      accounts,
+		Probe:         probe,
+		dnsTTL:        dnsTTL,
+		zoneID:        zoneID,
+		recordID:      recordID,
+		client:        client,
+		dryRun:        dryRun,
+		quota:         quota,
+		state:         StateAuto,
+		manualIndex:   -1,
+		lastCheckDay:  time.Now().Format("2006-01-02"), // 启动当天不触发每日回切扫描
+		targetResults: results,
+		maxEvents:     50,
 	}, nil
 }
 
-// probeTarget 探测单个目标。server 模式：确定性失败（连接错误/5xx）判失败；
+// findAccount 按名称查配额账号
+func (s *Site) findAccount(name string) *config.CFAccount {
+	for i := range s.Accounts {
+		if s.Accounts[i].Name == name {
+			return &s.Accounts[i]
+		}
+	}
+	return nil
+}
+
+// probeTarget 探测单个目标。确定性失败（连接错误/4xx/5xx）判失败；
 // 超时视为「慢」不判挂（服务器侧线路差不等于目标挂）。
 func probeTarget(t *config.TargetConfig, healthPath string, timeout time.Duration) TargetStatus {
-	st := TargetStatus{Name: t.Name, RecordType: t.RecordType, DNSContent: t.DNSContent}
+	st := TargetStatus{Name: t.Name, RecordType: t.RecordType, DNSContent: t.DNSContent, QuotaAccount: t.QuotaAccount}
 	path := healthPath
 	if t.Health != "" {
 		path = t.Health
@@ -143,7 +179,7 @@ func probeTarget(t *config.TargetConfig, healthPath string, timeout time.Duratio
 		return st
 	}
 	resp.Body.Close()
-	if resp.StatusCode >= 500 {
+	if resp.StatusCode >= 400 {
 		st.OK = false
 		st.Detail = fmt.Sprintf("HTTP %d", resp.StatusCode)
 		return st
@@ -153,41 +189,148 @@ func probeTarget(t *config.TargetConfig, healthPath string, timeout time.Duratio
 	return st
 }
 
+// refreshQuotas 节流刷新本站点引用的所有账号配额（含兜底更新到 targetResults）
+func (s *Site) refreshQuotas() {
+	if time.Since(s.lastQuotaAt) < time.Duration(s.Probe.QuotaInterval)*time.Second {
+		return
+	}
+	s.lastQuotaAt = time.Now()
+	seen := map[string]bool{}
+	for i := range s.Targets {
+		name := s.Targets[i].QuotaAccount
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		acc := s.findAccount(name)
+		if acc == nil {
+			continue
+		}
+		u, err := s.quota(*acc)
+		for j := range s.Targets {
+			if s.Targets[j].QuotaAccount != name {
+				continue
+			}
+			st := &s.targetResults[j]
+			st.QuotaUsed = u.Used
+			st.QuotaLimit = u.Quota
+			st.QuotaPercent = u.Percent
+			st.QuotaOver = u.OverLimit
+			st.QuotaError = u.Error
+			if err != nil {
+				st.QuotaError = err.Error()
+			}
+		}
+	}
+}
+
+// targetQuotaOK 目标配额是否可用（读最近刷新结果；无 quota_account 视为无限额度）
+func (s *Site) targetQuotaOK(i int) bool {
+	if s.Targets[i].QuotaAccount == "" {
+		return true
+	}
+	return !s.targetResults[i].QuotaOver
+}
+
+// setTargetProbe 写入探测结果并保留该目标已刷新的配额状态（避免覆盖 QuotaOver 等字段）
+func (s *Site) setTargetProbe(i int, p TargetStatus) {
+	prev := s.targetResults[i]
+	p.QuotaUsed = prev.QuotaUsed
+	p.QuotaLimit = prev.QuotaLimit
+	p.QuotaPercent = prev.QuotaPercent
+	p.QuotaOver = prev.QuotaOver
+	p.QuotaError = prev.QuotaError
+	s.targetResults[i] = p
+}
+
+// firstAvailable 返回队列中第一个「配额可用且健康」的目标（每日回切扫描用）。
+// 当前目标视为候选但不重新探测（tick 已探测）；返回 -1 表示无可回切目标。
+func (s *Site) firstAvailable() int {
+	timeout := time.Duration(s.Probe.Timeout) * time.Second
+	for i := range s.Targets {
+		if !s.targetQuotaOK(i) {
+			continue
+		}
+		if i == s.currentIndex {
+			return i
+		}
+		t := &s.Targets[i]
+		p := probeTarget(t, t.Health, timeout)
+		s.setTargetProbe(i, p)
+		if p.OK {
+			return i
+		}
+	}
+	return -1
+}
+
+// nextAvailable 返回 currentIndex 之后第一个「配额可用且健康」的目标（切换推进用）。
+// 不回绕（避免环形乒乓）；返回 -1 表示无可切目标（当前已是最后兜底）。
+func (s *Site) nextAvailable() int {
+	timeout := time.Duration(s.Probe.Timeout) * time.Second
+	for i := s.currentIndex + 1; i < len(s.Targets); i++ {
+		if !s.targetQuotaOK(i) {
+			continue
+		}
+		t := &s.Targets[i]
+		p := probeTarget(t, t.Health, timeout)
+		s.setTargetProbe(i, p)
+		if p.OK {
+			return i
+		}
+	}
+	return -1
+}
+
 // tick 一次探测与状态迁移（调用方持锁）
 func (s *Site) tick() {
 	if s.state == StateManual {
 		return
 	}
-	timeout := time.Duration(s.Probe.Timeout) * time.Second
-	p := probeTarget(&s.Primary, s.Primary.Health, timeout)
-	b := probeTarget(&s.Backup, s.Backup.Health, timeout)
-	s.primaryResult = p
-	s.backupResult = b
+	s.refreshQuotas()
 
-	switch s.state {
-	case StateActive:
-		if !p.OK {
-			s.failStreak++
-			if s.failStreak >= s.Probe.FailThreshold && b.OK && s.cooldownDone() {
-				s.doSwitch("backup", "auto", fmt.Sprintf("主连续失败 %d 次（%s），备健康，切到备", s.failStreak, p.Detail))
+	// 每日配额重置回切扫描：新的一天找最早可用目标切回
+	today := time.Now().Format("2006-01-02")
+	if today != s.lastCheckDay {
+		s.lastCheckDay = today
+		if s.cooldownDone() {
+			if idx := s.firstAvailable(); idx >= 0 && idx != s.currentIndex {
+				s.doSwitch(idx, "auto", "每日配额重置，切回最早可用目标")
+				return
 			}
-		} else {
-			s.failStreak = 0
 		}
-	case StateFailedOver:
-		if !b.OK {
-			s.backupFailStreak++
-		} else {
-			s.backupFailStreak = 0
-		}
-		if p.OK {
-			s.okStreak++
-			if s.okStreak >= s.Probe.RecoverThreshold && s.cooldownDone() {
-				s.doSwitch("primary", "auto", fmt.Sprintf("主恢复稳定 %d 次，切回主", s.okStreak))
+	}
+
+	cur := &s.Targets[s.currentIndex]
+	timeout := time.Duration(s.Probe.Timeout) * time.Second
+	p := probeTarget(cur, cur.Health, timeout)
+	s.setTargetProbe(s.currentIndex, p)
+
+	// 配额信号（主）：当前目标配额超限 → 切下一个
+	if s.Targets[s.currentIndex].QuotaAccount != "" && s.targetResults[s.currentIndex].QuotaOver {
+		if s.cooldownDone() {
+			if idx := s.nextAvailable(); idx >= 0 {
+				st := s.targetResults[s.currentIndex]
+				s.doSwitch(idx, "quota", fmt.Sprintf("配额超限 %.0f%%（%d/%d），切到 %s", st.QuotaPercent, st.QuotaUsed, st.QuotaLimit, s.Targets[idx].Name))
+			} else {
+				log.Printf("failover %s: 配额超限但无可用后继目标（已是最后兜底）", s.Domain)
 			}
-		} else {
-			s.okStreak = 0
 		}
+		return
+	}
+
+	// 健康信号（辅）：当前目标连续失败 → 切下一个
+	if !p.OK {
+		s.failStreak++
+		if s.failStreak >= s.Probe.FailThreshold && s.cooldownDone() {
+			if idx := s.nextAvailable(); idx >= 0 {
+				s.doSwitch(idx, "auto", fmt.Sprintf("%s 连续失败 %d 次（%s），切到 %s", cur.Name, s.failStreak, p.Detail, s.Targets[idx].Name))
+			} else {
+				log.Printf("failover %s: %s 连续失败但无可用后继目标（兜底失守）", s.Domain, cur.Name)
+			}
+		}
+	} else {
+		s.failStreak = 0
 	}
 }
 
@@ -197,64 +340,68 @@ func (s *Site) cooldownDone() bool {
 }
 
 // doSwitch 执行切换：PATCH DNS 记录 + 更新状态（调用方持锁）。
-// 目标为 primary/backup；reason 为 auto/manual。
-func (s *Site) doSwitch(target, reason, detail string) error {
-	t := &s.Primary
-	to := StateActive
-	if target == "backup" {
-		t = &s.Backup
-		to = StateFailedOver
-	}
-	from := s.currentTargetName()
+// 目标为队列下标 index；reason 为 auto/quota/manual。
+// PATCH 失败回滚 currentIndex，状态机与真实 DNS 保持一致。
+func (s *Site) doSwitch(index int, reason, detail string) error {
+	target := s.Targets[index]
+	from := s.Targets[s.currentIndex].Name
 	s.cooldownUntil = time.Now().Add(time.Duration(s.Probe.Cooldown) * time.Second)
-	s.failStreak, s.okStreak, s.backupFailStreak = 0, 0, 0
-	s.state = to
-	if reason == "manual" {
-		s.manualTarget = target
-		s.state = StateManual
+	s.failStreak = 0
+
+	// dry-run 监控模式：自动切换只决策不实际 PATCH；手动切换放行（人有意识的操作应真实生效）
+	if s.dryRun && reason != "manual" {
+		s.currentIndex = index
+		s.appendEvent(from, target.Name, reason, detail+"（dry-run，未实际修改 DNS）")
+		log.Printf("failover %s [dry-run]: 决策切到 %s（%s, %s）", s.Domain, target.Name, reason, detail)
+		return nil
 	}
+
+	if _, err := s.client.PatchRecord(s.zoneID, s.recordID, target.RecordType, target.DNSContent, s.dnsTTL, true); err != nil {
+		s.appendEvent(from, target.Name, reason, "切换失败: "+err.Error())
+		log.Printf("failover %s 切换失败（%s→%s）: %v", s.Domain, from, target.Name, err)
+		return err
+	}
+	s.currentIndex = index
+	if reason == "manual" {
+		s.state = StateManual
+		s.manualIndex = index
+	}
+	s.appendEvent(from, target.Name, reason, detail)
+	log.Printf("failover %s: DNS 切到 %s（%s, %s）", s.Domain, target.Name, reason, detail)
+	return nil
+}
+
+func (s *Site) appendEvent(from, to, reason, detail string) {
 	s.events = append(s.events, SwitchEvent{
 		Time:   time.Now().Format("15:04:05"),
 		From:   from,
-		To:     t.Name,
+		To:     to,
 		Reason: reason,
 		Detail: detail,
 	})
 	if len(s.events) > s.maxEvents {
 		s.events = s.events[len(s.events)-s.maxEvents:]
 	}
-	if s.dryRun {
-		log.Printf("failover %s [dry-run]: 决策切到 %s（%s, %s），未实际修改 DNS", s.Domain, t.Name, reason, detail)
-		return nil
-	}
-	_, err := s.client.PatchRecord(s.zoneID, s.recordID, t.RecordType, t.DNSContent, s.dnsTTL, true)
-	if err != nil {
-		log.Printf("failover %s 切换失败（%s→%s）: %v", s.Domain, from, t.Name, err)
-		return err
-	}
-	log.Printf("failover %s: DNS 切到 %s（%s, %s）", s.Domain, t.Name, reason, detail)
-	return nil
 }
 
-// currentTargetName 当前状态对应的目标名
-func (s *Site) currentTargetName() string {
-	if s.state == StateFailedOver {
-		return s.Backup.Name
+// matchIndex 按 DNS 记录（type+content）匹配目标下标；-1 表示不匹配任何目标
+func (s *Site) matchIndex(rt, content string) int {
+	for i := range s.Targets {
+		if s.Targets[i].RecordType == rt && s.Targets[i].DNSContent == content {
+			return i
+		}
 	}
-	if s.state == StateManual && s.manualTarget == "backup" {
-		return s.Backup.Name
-	}
-	return s.Primary.Name
+	return -1
 }
 
-// ManualSwitch 手动切换到指定目标（primary/backup），进入手动模式
-func (s *Site) ManualSwitch(target string) error {
-	if target != "primary" && target != "backup" {
-		return fmt.Errorf("目标必须是 primary 或 backup")
+// ManualSwitch 手动切换到指定目标（队列下标），进入手动模式
+func (s *Site) ManualSwitch(index int) error {
+	if index < 0 || index >= len(s.Targets) {
+		return fmt.Errorf("目标下标越界（0-%d）", len(s.Targets)-1)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.doSwitch(target, "manual", "面板手动切换")
+	return s.doSwitch(index, "manual", "面板手动切换")
 }
 
 // ManualAuto 退出手动模式：按当前 DNS 记录实际指向恢复自动
@@ -265,11 +412,13 @@ func (s *Site) ManualAuto() error {
 	if err != nil {
 		return err
 	}
-	s.state = StateActive
-	if rec.Content == s.Backup.DNSContent && rec.Type == s.Backup.RecordType {
-		s.state = StateFailedOver
+	idx := s.matchIndex(rec.Type, rec.Content)
+	if idx < 0 {
+		idx = 0
 	}
-	s.manualTarget = ""
+	s.currentIndex = idx
+	s.state = StateAuto
+	s.manualIndex = -1
 	log.Printf("failover %s: 恢复自动（当前 DNS 指向 %s）", s.Domain, rec.Content)
 	return nil
 }
@@ -280,13 +429,10 @@ func (s *Site) SyncActual() error {
 	if err != nil {
 		return err
 	}
-	s.state = StateActive
-	if rec.Content == s.Backup.DNSContent && rec.Type == s.Backup.RecordType {
-		s.state = StateFailedOver
+	if idx := s.matchIndex(rec.Type, rec.Content); idx >= 0 {
+		s.currentIndex = idx
 	}
-	s.primaryResult = TargetStatus{Name: s.Primary.Name, RecordType: s.Primary.RecordType, DNSContent: s.Primary.DNSContent}
-	s.backupResult = TargetStatus{Name: s.Backup.Name, RecordType: s.Backup.RecordType, DNSContent: s.Backup.DNSContent}
-	log.Printf("failover %s: 启动对齐，当前 DNS 指向 %s（%s）", s.Domain, rec.Content, s.state)
+	log.Printf("failover %s: 启动对齐，当前 DNS 指向 %s（目标 %s）", s.Domain, rec.Content, s.Targets[s.currentIndex].Name)
 	return nil
 }
 
@@ -298,28 +444,22 @@ func (s *Site) Snapshot() SiteStatus {
 	if !s.cooldownDone() {
 		cd = int(time.Until(s.cooldownUntil).Seconds())
 	}
+	tr := make([]TargetStatus, len(s.targetResults))
+	copy(tr, s.targetResults)
 	evs := make([]SwitchEvent, len(s.events))
 	copy(evs, s.events)
-	p := s.primaryResult
-	if p.Name == "" {
-		p = TargetStatus{Name: s.Primary.Name, RecordType: s.Primary.RecordType, DNSContent: s.Primary.DNSContent}
-	}
-	b := s.backupResult
-	if b.Name == "" {
-		b = TargetStatus{Name: s.Backup.Name, RecordType: s.Backup.RecordType, DNSContent: s.Backup.DNSContent}
-	}
 	return SiteStatus{
 		Domain:       s.Domain,
 		State:        s.state,
-		ManualTarget: s.manualTarget,
-		Primary:      p,
-		Backup:       b,
+		Current:      s.Targets[s.currentIndex].Name,
+		CurrentIndex: s.currentIndex,
+		Targets:      tr,
 		CooldownLeft: cd,
 		Events:       evs,
 	}
 }
 
-// Manager 所有 failover 站点的调度器
+// Manager 所有轮换站点的调度器
 type Manager struct {
 	sites    []*Site
 	interval time.Duration
@@ -365,12 +505,19 @@ func (m *Manager) loop(ctx context.Context) {
 	}
 }
 
+// tickAll 逐站 tick；每站并发执行（探测/配额查询互不阻塞）
 func (m *Manager) tickAll() {
+	var wg sync.WaitGroup
 	for _, s := range m.sites {
-		s.mu.Lock()
-		s.tick()
-		s.mu.Unlock()
+		wg.Add(1)
+		go func(s *Site) {
+			defer wg.Done()
+			s.mu.Lock()
+			s.tick()
+			s.mu.Unlock()
+		}(s)
 	}
+	wg.Wait()
 }
 
 // Snapshot 全部站点状态
@@ -382,12 +529,12 @@ func (m *Manager) Snapshot() []SiteStatus {
 	return st
 }
 
-// BuildSites 从配置构建 failover 站点列表（含 zone_id/record_id 解析）。
-// 仅包含配置了 primary/backup 的站点。
-func BuildSites(cfg *config.Config, client *dns.Client) ([]*Site, error) {
+// BuildSites 从配置构建轮换站点列表（含 zone_id/record_id 解析）。
+// 仅包含配置了 Targets 的站点。accounts 为配额账号池（settings.cf_accounts）。
+func BuildSites(cfg *config.Config, client *dns.Client, accounts []config.CFAccount) ([]*Site, error) {
 	var sites []*Site
 	for _, sc := range cfg.Sites {
-		if sc.Primary.Name == "" || sc.Backup.Name == "" {
+		if len(sc.Targets) == 0 {
 			continue // 旧转发站点，不归 failover 管
 		}
 		zoneID, err := client.ZoneID(cfg.DNS.Zone)
@@ -398,7 +545,7 @@ func BuildSites(cfg *config.Config, client *dns.Client) ([]*Site, error) {
 		if err != nil {
 			return nil, fmt.Errorf("site %s: %w", sc.Domain, err)
 		}
-		s, err := NewSite(sc.Domain, sc.Primary, sc.Backup, sc.Probe, client, zoneID, recordID, cfg.DNS.TTL, cfg.DNS.DryRun)
+		s, err := NewSite(sc.Domain, sc.Targets, accounts, sc.Probe, client, zoneID, recordID, cfg.DNS.TTL, cfg.DNS.DryRun, cf.QueryUsage)
 		if err != nil {
 			return nil, err
 		}

@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS failover_sites (
   probe_fail_threshold INTEGER NOT NULL DEFAULT 3,
   probe_recover_threshold INTEGER NOT NULL DEFAULT 10,
   probe_cooldown INTEGER NOT NULL DEFAULT 120,
+  probe_quota_interval INTEGER NOT NULL DEFAULT 300,
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 `
@@ -112,6 +113,27 @@ CREATE TABLE IF NOT EXISTS failover_sites (
 	}
 	if !has {
 		_, err = s.db.Exec(`ALTER TABLE upstreams ADD COLUMN cf_account TEXT NOT NULL DEFAULT ''`)
+		if err != nil {
+			return err
+		}
+	}
+	// failover_sites 升级：加 targets 列（JSON 目标队列）与 probe_quota_interval 列
+	has, err = s.columnExists("failover_sites", "targets")
+	if err != nil {
+		return err
+	}
+	if !has {
+		_, err = s.db.Exec(`ALTER TABLE failover_sites ADD COLUMN targets TEXT NOT NULL DEFAULT ''`)
+		if err != nil {
+			return err
+		}
+	}
+	has, err = s.columnExists("failover_sites", "probe_quota_interval")
+	if err != nil {
+		return err
+	}
+	if !has {
+		_, err = s.db.Exec(`ALTER TABLE failover_sites ADD COLUMN probe_quota_interval INTEGER NOT NULL DEFAULT 300`)
 		if err != nil {
 			return err
 		}
@@ -274,26 +296,35 @@ func (s *Store) LoadConfig() (*config.Config, error) {
 		cfg.DNS.TokenEnv = v
 	}
 
-	// failover 站点（DNS 直连模式）
+	// failover 站点（DNS 配额轮换）
 	fos, err := s.ListFailoverSites()
 	if err != nil {
 		return nil, err
 	}
 	for _, fo := range fos {
+		targets := fo.Targets
+		if len(targets) == 0 {
+			// 回退旧 primary/backup 字段
+			if fo.PrimaryName != "" {
+				targets = append(targets, config.TargetConfig{
+					Name: fo.PrimaryName, RecordType: fo.PrimaryRecordType, DNSContent: fo.PrimaryDNSContent,
+					URL: fo.PrimaryURL, Health: fo.PrimaryHealth,
+				})
+			}
+			if fo.BackupName != "" {
+				targets = append(targets, config.TargetConfig{
+					Name: fo.BackupName, RecordType: fo.BackupRecordType, DNSContent: fo.BackupDNSContent,
+					URL: fo.BackupURL, Health: fo.BackupHealth,
+				})
+			}
+		}
 		cfg.Sites = append(cfg.Sites, config.SiteConfig{
 			Domain: fo.Domain,
-			Primary: config.TargetConfig{
-				Name: fo.PrimaryName, RecordType: fo.PrimaryRecordType, DNSContent: fo.PrimaryDNSContent,
-				URL: fo.PrimaryURL, Health: fo.PrimaryHealth,
-			},
-			Backup: config.TargetConfig{
-				Name: fo.BackupName, RecordType: fo.BackupRecordType, DNSContent: fo.BackupDNSContent,
-				URL: fo.BackupURL, Health: fo.BackupHealth,
-			},
+			Targets: targets,
 			Probe: config.ProbeConfig{
 				Mode: fo.ProbeMode, Interval: fo.ProbeInterval, Timeout: fo.ProbeTimeout,
 				FailThreshold: fo.ProbeFailThreshold, RecoverThreshold: fo.ProbeRecoverThreshold,
-				Cooldown: fo.ProbeCooldown,
+				Cooldown: fo.ProbeCooldown, QuotaInterval: fo.ProbeQuotaInterval,
 			},
 		})
 	}
@@ -436,11 +467,15 @@ func (s *Store) DeleteUpstream(id int64) error {
 	return err
 }
 
-// FailoverSiteRecord failover（DNS 故障切换）站点数据库记录
+// FailoverSiteRecord failover（DNS 配额轮换）站点数据库记录
 type FailoverSiteRecord struct {
-	ID   int64  `json:"id"`
+	ID     int64  `json:"id"`
 	Domain string `json:"domain"`
 
+	// 目标队列（JSON 数组，新模型）；为空时回退旧 primary/backup 字段
+	Targets []config.TargetConfig `json:"targets"`
+
+	// 旧模型字段（保留兼容，新写入用 targets）
 	PrimaryName       string `json:"primary_name"`
 	PrimaryRecordType string `json:"primary_record_type"`
 	PrimaryDNSContent string `json:"primary_dns_content"`
@@ -453,20 +488,21 @@ type FailoverSiteRecord struct {
 	BackupURL        string `json:"backup_url"`
 	BackupHealth     string `json:"backup_health"`
 
-	ProbeMode            string `json:"probe_mode"`
-	ProbeInterval        int    `json:"probe_interval"`
-	ProbeTimeout         int    `json:"probe_timeout"`
-	ProbeFailThreshold   int    `json:"probe_fail_threshold"`
-	ProbeRecoverThreshold int   `json:"probe_recover_threshold"`
-	ProbeCooldown        int    `json:"probe_cooldown"`
+	ProbeMode             string `json:"probe_mode"`
+	ProbeInterval         int    `json:"probe_interval"`
+	ProbeTimeout          int    `json:"probe_timeout"`
+	ProbeFailThreshold    int    `json:"probe_fail_threshold"`
+	ProbeRecoverThreshold int    `json:"probe_recover_threshold"`
+	ProbeCooldown         int    `json:"probe_cooldown"`
+	ProbeQuotaInterval    int    `json:"probe_quota_interval"`
 }
 
-// ListFailoverSites 读取全部 failover 站点
+// ListFailoverSites 读取全部 failover 站点（targets 为空时回退旧 primary/backup 字段）
 func (s *Store) ListFailoverSites() ([]FailoverSiteRecord, error) {
-	rows, err := s.db.Query(`SELECT id, domain,
+	rows, err := s.db.Query(`SELECT id, domain, targets,
 		primary_name, primary_record_type, primary_dns_content, primary_url, primary_health,
 		backup_name, backup_record_type, backup_dns_content, backup_url, backup_health,
-		probe_mode, probe_interval, probe_timeout, probe_fail_threshold, probe_recover_threshold, probe_cooldown
+		probe_mode, probe_interval, probe_timeout, probe_fail_threshold, probe_recover_threshold, probe_cooldown, probe_quota_interval
 		FROM failover_sites ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -475,29 +511,39 @@ func (s *Store) ListFailoverSites() ([]FailoverSiteRecord, error) {
 	var out []FailoverSiteRecord
 	for rows.Next() {
 		var r FailoverSiteRecord
-		if err := rows.Scan(&r.ID, &r.Domain,
+		var targetsRaw string
+		if err := rows.Scan(&r.ID, &r.Domain, &targetsRaw,
 			&r.PrimaryName, &r.PrimaryRecordType, &r.PrimaryDNSContent, &r.PrimaryURL, &r.PrimaryHealth,
 			&r.BackupName, &r.BackupRecordType, &r.BackupDNSContent, &r.BackupURL, &r.BackupHealth,
-			&r.ProbeMode, &r.ProbeInterval, &r.ProbeTimeout, &r.ProbeFailThreshold, &r.ProbeRecoverThreshold, &r.ProbeCooldown); err != nil {
+			&r.ProbeMode, &r.ProbeInterval, &r.ProbeTimeout, &r.ProbeFailThreshold, &r.ProbeRecoverThreshold, &r.ProbeCooldown, &r.ProbeQuotaInterval); err != nil {
 			return nil, err
+		}
+		if targetsRaw != "" {
+			if err := json.Unmarshal([]byte(targetsRaw), &r.Targets); err != nil {
+				return nil, fmt.Errorf("解析 %s 的 targets: %w", r.Domain, err)
+			}
 		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
 }
 
-// CreateFailoverSite 新建 failover 站点
+// CreateFailoverSite 新建 failover 站点（targets 序列化为 JSON，旧 primary/backup 字段同步写入以兼容）
 func (s *Store) CreateFailoverSite(r FailoverSiteRecord) (int64, error) {
+	targetsRaw, err := json.Marshal(r.Targets)
+	if err != nil {
+		return 0, err
+	}
 	res, err := s.db.Exec(`INSERT INTO failover_sites(
-		domain,
+		domain, targets,
 		primary_name, primary_record_type, primary_dns_content, primary_url, primary_health,
 		backup_name, backup_record_type, backup_dns_content, backup_url, backup_health,
-		probe_mode, probe_interval, probe_timeout, probe_fail_threshold, probe_recover_threshold, probe_cooldown)
-		VALUES(?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?)`,
-		r.Domain,
+		probe_mode, probe_interval, probe_timeout, probe_fail_threshold, probe_recover_threshold, probe_cooldown, probe_quota_interval)
+		VALUES(?, ?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?,?)`,
+		r.Domain, string(targetsRaw),
 		r.PrimaryName, r.PrimaryRecordType, r.PrimaryDNSContent, r.PrimaryURL, r.PrimaryHealth,
 		r.BackupName, r.BackupRecordType, r.BackupDNSContent, r.BackupURL, r.BackupHealth,
-		r.ProbeMode, r.ProbeInterval, r.ProbeTimeout, r.ProbeFailThreshold, r.ProbeRecoverThreshold, r.ProbeCooldown)
+		r.ProbeMode, r.ProbeInterval, r.ProbeTimeout, r.ProbeFailThreshold, r.ProbeRecoverThreshold, r.ProbeCooldown, r.ProbeQuotaInterval)
 	if err != nil {
 		return 0, err
 	}
@@ -506,17 +552,21 @@ func (s *Store) CreateFailoverSite(r FailoverSiteRecord) (int64, error) {
 
 // UpdateFailoverSite 更新 failover 站点
 func (s *Store) UpdateFailoverSite(r FailoverSiteRecord) error {
-	_, err := s.db.Exec(`UPDATE failover_sites SET
-		domain=?,
+	targetsRaw, err := json.Marshal(r.Targets)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`UPDATE failover_sites SET
+		domain=?, targets=?,
 		primary_name=?, primary_record_type=?, primary_dns_content=?, primary_url=?, primary_health=?,
 		backup_name=?, backup_record_type=?, backup_dns_content=?, backup_url=?, backup_health=?,
-		probe_mode=?, probe_interval=?, probe_timeout=?, probe_fail_threshold=?, probe_recover_threshold=?, probe_cooldown=?,
+		probe_mode=?, probe_interval=?, probe_timeout=?, probe_fail_threshold=?, probe_recover_threshold=?, probe_cooldown=?, probe_quota_interval=?,
 		updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
 		WHERE id=?`,
-		r.Domain,
+		r.Domain, string(targetsRaw),
 		r.PrimaryName, r.PrimaryRecordType, r.PrimaryDNSContent, r.PrimaryURL, r.PrimaryHealth,
 		r.BackupName, r.BackupRecordType, r.BackupDNSContent, r.BackupURL, r.BackupHealth,
-		r.ProbeMode, r.ProbeInterval, r.ProbeTimeout, r.ProbeFailThreshold, r.ProbeRecoverThreshold, r.ProbeCooldown,
+		r.ProbeMode, r.ProbeInterval, r.ProbeTimeout, r.ProbeFailThreshold, r.ProbeRecoverThreshold, r.ProbeCooldown, r.ProbeQuotaInterval,
 		r.ID)
 	return err
 }

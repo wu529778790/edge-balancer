@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/wu529778790/edge-balancer/internal/config"
@@ -26,7 +27,18 @@ type Usage struct {
 // QueryUsage 查询单个账号当天 Workers 请求数（GraphQL Analytics API）
 // 免费版限额 100,000 请求/天（非每月）；查 date_geq/date_leq = 今天
 // 注意：字段名为 workersInvocationsAdaptive（无 Groups 后缀，文档有误）
+// token 来源：优先 acc.TokenEnv 指定的环境变量（推荐，不落盘），回退 acc.Token（旧明文字段）
 func QueryUsage(acc config.CFAccount) (Usage, error) {
+	token := acc.Token
+	if acc.TokenEnv != "" {
+		if v := os.Getenv(acc.TokenEnv); v != "" {
+			token = v
+		}
+	}
+	if token == "" {
+		return Usage{}, fmt.Errorf("账号 %s 未配置 token（TokenEnv 环境变量 %q 或 Token 字段）", acc.Name, acc.TokenEnv)
+	}
+
 	quota := acc.Quota
 	if quota <= 0 {
 		quota = 100000
@@ -48,7 +60,7 @@ func QueryUsage(acc config.CFAccount) (Usage, error) {
 	if err != nil {
 		return Usage{}, err
 	}
-	req.Header.Set("Authorization", "Bearer "+acc.Token)
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: 15 * time.Second}

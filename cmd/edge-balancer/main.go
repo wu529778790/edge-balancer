@@ -79,8 +79,19 @@ func main() {
 	go func() {
 		log.Printf("edge-balancer 启动，监听 %s，站点 %d 个", cfg.Listen, len(cfg.Sites))
 		for _, s := range cfg.Sites {
-			if s.Primary.Name != "" || s.Backup.Name != "" {
-				log.Printf("  站点: %-32s DNS 直连模式（主 %s → %s，备 %s → %s）", s.Domain, s.Primary.Name, s.Primary.DNSContent, s.Backup.Name, s.Backup.DNSContent)
+			if len(s.Targets) > 0 {
+				names := make([]string, 0, len(s.Targets))
+				for _, t := range s.Targets {
+					names = append(names, t.Name)
+				}
+				log.Printf("  站点: %-32s DNS 轮换队列 %v（当前按队列顺序消费配额）", s.Domain, names)
+				for _, t := range s.Targets {
+					quota := ""
+					if t.QuotaAccount != "" {
+						quota = " 配额:" + t.QuotaAccount
+					}
+					log.Printf("    %s: %s %s → %s%s", t.Name, t.RecordType, t.DNSContent, t.URL, quota)
+				}
 				continue
 			}
 			log.Printf("  站点: %-32s 策略 %-10s 上游 %d 个", s.Domain, s.Strategy, len(s.Upstreams))

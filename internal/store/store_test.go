@@ -5,6 +5,8 @@ import (
 	"os"
 	"testing"
 
+	"github.com/wu529778790/edge-balancer/internal/config"
+
 	_ "github.com/tursodatabase/libsql-client-go/libsql"
 	_ "modernc.org/sqlite" // file: 协议的本地 sqlite 驱动（测试用）
 )
@@ -26,18 +28,23 @@ func testStore(t *testing.T) *Store {
 	return s
 }
 
-// failover 站点 CRUD 往返
+func sampleTargets() []config.TargetConfig {
+	return []config.TargetConfig{
+		{Name: "worker-a", RecordType: "CNAME", DNSContent: "parse-shenzjd-com.shenzjd.workers.dev", URL: "https://parse-shenzjd-com.shenzjd.workers.dev", Health: "/api/health", QuotaAccount: "shenzjd"},
+		{Name: "worker-b", RecordType: "CNAME", DNSContent: "parse-shenzjd-com.2509818162.workers.dev", URL: "https://parse-shenzjd-com.2509818162.workers.dev", Health: "/api/health", QuotaAccount: "2509818162"},
+		{Name: "server", RecordType: "A", DNSContent: "43.128.70.75", URL: "http://127.0.0.1:5269", Health: "/api/health"},
+	}
+}
+
+// failover 站点 CRUD 往返（targets 队列新模型）
 func TestFailoverSitesCRUD(t *testing.T) {
 	s := testStore(t)
 
 	r := FailoverSiteRecord{
-		Domain: "parse.shenzjd.com",
-		PrimaryName: "cf-worker", PrimaryRecordType: "CNAME", PrimaryDNSContent: "parse-shenzjd-com.shenzjd.workers.dev",
-		PrimaryURL: "https://parse-shenzjd-com.shenzjd.workers.dev", PrimaryHealth: "/api/health",
-		BackupName: "server", BackupRecordType: "A", BackupDNSContent: "43.128.70.75",
-		BackupURL: "http://127.0.0.1:5269", BackupHealth: "/api/health",
+		Domain:  "parse.shenzjd.com",
+		Targets: sampleTargets(),
 		ProbeMode: "server", ProbeInterval: 10, ProbeTimeout: 10,
-		ProbeFailThreshold: 3, ProbeRecoverThreshold: 10, ProbeCooldown: 120,
+		ProbeFailThreshold: 3, ProbeCooldown: 120, ProbeQuotaInterval: 300,
 	}
 	id, err := s.CreateFailoverSite(r)
 	if err != nil {
@@ -51,19 +58,22 @@ func TestFailoverSitesCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("列表: %v", err)
 	}
-	if len(list) != 1 || list[0].Domain != "parse.shenzjd.com" || list[0].PrimaryDNSContent != "parse-shenzjd-com.shenzjd.workers.dev" {
+	if len(list) != 1 || list[0].Domain != "parse.shenzjd.com" || len(list[0].Targets) != 3 {
 		t.Fatalf("列表内容异常: %+v", list)
+	}
+	if list[0].Targets[0].DNSContent != "parse-shenzjd-com.shenzjd.workers.dev" || list[0].Targets[0].QuotaAccount != "shenzjd" {
+		t.Fatalf("targets 序列化往返异常: %+v", list[0].Targets)
 	}
 
 	// 更新
 	r.ID = id
-	r.PrimaryDNSContent = "changed.workers.dev"
+	r.Targets[0].DNSContent = "changed.workers.dev"
 	if err := s.UpdateFailoverSite(r); err != nil {
 		t.Fatalf("更新: %v", err)
 	}
 	list2, _ := s.ListFailoverSites()
-	if list2[0].PrimaryDNSContent != "changed.workers.dev" {
-		t.Fatalf("更新未生效: %+v", list2[0])
+	if list2[0].Targets[0].DNSContent != "changed.workers.dev" {
+		t.Fatalf("更新未生效: %+v", list2[0].Targets)
 	}
 
 	// 删除
@@ -76,17 +86,14 @@ func TestFailoverSitesCRUD(t *testing.T) {
 	}
 }
 
-// LoadConfig 从库构建 failover 站点与 dns 全局配置
+// LoadConfig 从库构建 failover（targets 队列）与 dns 全局配置
 func TestLoadConfigBuildsFailover(t *testing.T) {
 	s := testStore(t)
 	if _, err := s.CreateFailoverSite(FailoverSiteRecord{
-		Domain: "parse.shenzjd.com",
-		PrimaryName: "cf-worker", PrimaryRecordType: "CNAME", PrimaryDNSContent: "parse-shenzjd-com.shenzjd.workers.dev",
-		PrimaryURL: "https://parse-shenzjd-com.shenzjd.workers.dev",
-		BackupName: "server", BackupRecordType: "A", BackupDNSContent: "43.128.70.75",
-		BackupURL: "http://127.0.0.1:5269",
+		Domain:  "parse.shenzjd.com",
+		Targets: sampleTargets(),
 		ProbeMode: "server", ProbeInterval: 10, ProbeTimeout: 10,
-		ProbeFailThreshold: 3, ProbeRecoverThreshold: 10, ProbeCooldown: 120,
+		ProbeFailThreshold: 3, ProbeCooldown: 120, ProbeQuotaInterval: 300,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -110,12 +117,15 @@ func TestLoadConfigBuildsFailover(t *testing.T) {
 	}
 	var fo, fwd int
 	for _, sc := range cfg.Sites {
-		if sc.Primary.Name != "" {
+		if len(sc.Targets) > 0 {
 			fo++
-			if sc.Primary.DNSContent != "parse-shenzjd-com.shenzjd.workers.dev" || sc.Backup.DNSContent != "43.128.70.75" {
-				t.Fatalf("failover 主备解析异常: %+v", sc)
+			if len(sc.Targets) != 3 || sc.Targets[0].DNSContent != "parse-shenzjd-com.shenzjd.workers.dev" || sc.Targets[2].DNSContent != "43.128.70.75" {
+				t.Fatalf("targets 解析异常: %+v", sc.Targets)
 			}
-			if sc.Probe.FailThreshold != 3 || sc.Probe.Cooldown != 120 {
+			if sc.Targets[0].QuotaAccount != "shenzjd" || sc.Targets[2].QuotaAccount != "" {
+				t.Fatalf("quota_account 解析异常: %+v", sc.Targets)
+			}
+			if sc.Probe.FailThreshold != 3 || sc.Probe.Cooldown != 120 || sc.Probe.QuotaInterval != 300 {
 				t.Fatalf("probe 解析异常: %+v", sc.Probe)
 			}
 		} else if len(sc.Upstreams) > 0 {
@@ -124,5 +134,31 @@ func TestLoadConfigBuildsFailover(t *testing.T) {
 	}
 	if fo != 1 || fwd != 1 {
 		t.Fatalf("应 1 个 failover + 1 个转发站点，实际 %d/%d", fo, fwd)
+	}
+}
+
+// 旧 primary/backup 字段兼容：无 targets 时回退构造
+func TestLoadConfigFallbackLegacyFields(t *testing.T) {
+	s := testStore(t)
+	if _, err := s.CreateFailoverSite(FailoverSiteRecord{
+		Domain: "parse.shenzjd.com",
+		PrimaryName: "cf-worker", PrimaryRecordType: "CNAME", PrimaryDNSContent: "parse-shenzjd-com.shenzjd.workers.dev",
+		PrimaryURL: "https://parse-shenzjd-com.shenzjd.workers.dev",
+		BackupName: "server", BackupRecordType: "A", BackupDNSContent: "43.128.70.75",
+		BackupURL: "http://127.0.0.1:5269",
+		ProbeMode: "server", ProbeInterval: 10, ProbeTimeout: 10,
+		ProbeFailThreshold: 3, ProbeCooldown: 120,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := s.LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.Sites) != 1 || len(cfg.Sites[0].Targets) != 2 {
+		t.Fatalf("旧字段应回退构造 2 个 targets，实际 %+v", cfg.Sites)
+	}
+	if cfg.Sites[0].Targets[0].Name != "cf-worker" || cfg.Sites[0].Targets[1].Name != "server" {
+		t.Fatalf("回退构造顺序异常: %+v", cfg.Sites[0].Targets)
 	}
 }

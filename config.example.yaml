@@ -2,13 +2,14 @@
 # 复制本文件为 config.yaml（已 gitignore），填入你的真实地址
 #
 # 注意：线上部署推荐 DB 模式（设置 EDGE_DB_URL/EDGE_DB_TOKEN），
-#       站点/上游/failover 站点/全局设置全部在面板「配置管理」页编辑，5s 热加载，
+#       站点/上游/failover 站点/CF 账号/全局设置全部在面板「配置管理」页编辑，5s 热加载，
 #       无需本文件。本文件仅用于本地文件模式调试。
 #
 # 两种站点模型（按站点二选一）：
-#   A. DNS 直连模式（新架构，推荐）：配置 primary/backup + dns
+#   A. DNS 配额轮换（新架构，推荐）：配置 targets 队列 + dns
 #      - 数据面用户直连 DNS 指向的目标（CF Worker / 服务器 IP），edge-balancer 不转发数据
-#      - edge-balancer 只做控制面：探测主/备健康，主挂自动调 Cloudflare DNS API 切换记录
+#      - 控制面：按 CF 免费配额（10 万请求/天/账号）消费目标队列：配额用尽或故障 → 切下一个
+#        （worker A → worker B → 服务器兜底）；配额每日重置后自动切回最早可用目标
 #   B. 转发模式（旧架构）：配置 upstreams
 #      - edge-balancer 作为中心网关按 Host 头转发到上游组
 
@@ -29,35 +30,53 @@ strategy: "least-conn"
 # 上游转发超时（秒）：仅转发模式生效
 upstream_timeout: 10
 
-# ---------- DNS 故障切换全局配置（新架构，仅直连模式站点需要） ----------
+# ---------- DNS 配额轮换全局配置（新架构，仅直连模式站点需要） ----------
 dns:
   zone: "shenzjd.com"            # 域名 zone（需托管在 Cloudflare）
   ttl: 60                        # 记录 TTL 秒；proxied=True 时 CF 强制自动，此值仅 proxied=False 生效
-  token_env: "CF_API_TOKEN"      # CF API token 环境变量名（权限：Zone.Zone:Read + Zone.DNS:Read + Zone.DNS:Edit）
-  dry_run: true                  # true=监控模式：只探测+决策+记录，不实际切换 DNS（上线观察期用）；验证准确后改 false
+  token_env: "CF_API_TOKEN"      # DNS 切换 token 环境变量名（权限：Zone.Zone:Read + Zone.DNS:Read + Zone.DNS:Edit）
+  dry_run: true                  # true=监控模式：自动切换只决策不实际 PATCH（上线观察期用）；验证准确后改 false
+
+# ---------- CF 配额账号池（新架构：每个 worker 账号一条） ----------
+# token 不落盘：通过 token_env 从环境变量读取（如 CF_TOKEN_SHENZJD），权限需含 Account Analytics:Read
+cf_accounts:
+  - name: "shenzjd"              # 与站点 target 的 quota_account 对应
+    account_id: "your-account-id-a"
+    quota: 100000                # 每日免费额度（请求数）
+    threshold: 90                # 使用率 ≥90% 判超限（预留切换余量）
+    token_env: "CF_TOKEN_SHENZJD"
+  - name: "2509818162"
+    account_id: "your-account-id-b"
+    quota: 100000
+    threshold: 90
+    token_env: "CF_TOKEN_2509818162"
 
 sites:
-  # ---- 直连模式站点示例（新架构）：DNS 平时 CNAME 到主（CF Worker），主挂自动切 A 到备（服务器 IP） ----
+  # ---- 直连模式站点示例（新架构）：目标队列按顺序消费配额，末位为兜底 ----
   - domain: "parse.shenzjd.com"
-    primary:                       # 主目标：用户直连，快
-      name: "cf-worker"
-      record_type: "CNAME"         # 切换后记录类型
-      dns_content: "parse-shenzjd-com.shenzjd.workers.dev"   # 切换后记录内容（CNAME 目标）
-      url: "https://parse-shenzjd-com.shenzjd.workers.dev"   # 探测用 URL（服务器侧）
-      health: "/api/health"        # 探测路径（默认用全局 health_path）
-    backup:                        # 备目标：主挂时切换
-      name: "server"
-      record_type: "A"
-      dns_content: "43.128.70.75"  # 服务器 IP
-      url: "http://127.0.0.1:5269" # 备=服务器自身，探测本地源站
-      health: "/api/health"
+    targets:                     # 有序队列：从前到后轮换（配额用尽/故障 → 切下一个）
+      - name: "worker-a"                     # 第一个 worker
+        record_type: "CNAME"
+        dns_content: "parse-shenzjd-com.shenzjd.workers.dev"
+        url: "https://parse-shenzjd-com.shenzjd.workers.dev"   # 探测用 URL（服务器侧）
+        health: "/api/health"                # 探测路径（默认用全局 health_path）
+        quota_account: "shenzjd"             # 配额信号：引 cf_accounts 账号
+      - name: "worker-b"                     # 第二个 worker（另一 CF 账号，配额独立）
+        record_type: "CNAME"
+        dns_content: "parse-shenzjd-com.2509818162.workers.dev"
+        url: "https://parse-shenzjd-com.2509818162.workers.dev"
+        quota_account: "2509818162"
+      - name: "server"                       # 末位：服务器兜底（无 quota_account = 无限额度）
+        record_type: "A"
+        dns_content: "43.128.70.75"
+        url: "http://127.0.0.1:5269"
     probe:
-      mode: "server"               # server=服务器侧探测（当前支持）；external=外部探活（预留，主目标建议用外部视角）
+      mode: "server"               # server=服务器侧探测（当前支持）；external=外部探活（预留）
       interval: 10                 # 探测间隔秒
       timeout: 10                  # 单次探测超时秒（超时视为慢，不判挂）
-      fail_threshold: 3            # 判挂：连续失败次数
-      recover_threshold: 10        # 判恢复：连续成功次数
+      fail_threshold: 3            # 判挂：连续失败次数（连接拒绝/4xx/5xx 才算，超时不判挂）
       cooldown: 120                # 切换后冷却秒（防抖）
+      quota_interval: 300          # 配额查询间隔秒（节流 CF GraphQL API）
 
   # ---- 转发模式站点示例（旧架构）：中心网关按 Host 头转发到上游组 ----
   - domain: "panhub.shenzjd.com"

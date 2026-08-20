@@ -72,14 +72,15 @@ func failoverConfigHash(cfg *config.Config) string {
 	sb.WriteString("|")
 	fmt.Fprintf(&sb, "%d|%v|", cfg.DNS.TTL, cfg.DNS.DryRun)
 	for _, sc := range cfg.Sites {
-		if sc.Primary.Name == "" {
+		if len(sc.Targets) == 0 {
 			continue
 		}
-		fmt.Fprintf(&sb, "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%d|%d|%d|%d|%d|",
-			sc.Domain,
-			sc.Primary.Name, sc.Primary.RecordType, sc.Primary.DNSContent, sc.Primary.URL, sc.Primary.Health,
-			sc.Backup.Name, sc.Backup.RecordType, sc.Backup.DNSContent, sc.Backup.URL, sc.Backup.Health,
-			sc.Probe.Mode, sc.Probe.Interval, sc.Probe.Timeout, sc.Probe.FailThreshold, sc.Probe.RecoverThreshold, sc.Probe.Cooldown)
+		fmt.Fprintf(&sb, "%s|%d|", sc.Domain, len(sc.Targets))
+		for _, t := range sc.Targets {
+			fmt.Fprintf(&sb, "%s|%s|%s|%s|%s|%s|", t.Name, t.RecordType, t.DNSContent, t.URL, t.Health, t.QuotaAccount)
+		}
+		fmt.Fprintf(&sb, "%s|%d|%d|%d|%d|%d|%d|",
+			sc.Probe.Mode, sc.Probe.Interval, sc.Probe.Timeout, sc.Probe.FailThreshold, sc.Probe.RecoverThreshold, sc.Probe.Cooldown, sc.Probe.QuotaInterval)
 	}
 	return sb.String()
 }
@@ -97,7 +98,7 @@ func (s *Server) reload() error {
 	}
 	s.cfg = cfg
 
-	// failover（DNS 故障切换）：配置指纹变化才重建（支持 DB 模式热加载，且不频繁调 CF API）
+	// failover（DNS 配额轮换）：配置指纹变化才重建（支持 DB 模式热加载，且不频繁调 CF API）
 	if s.dnsClient != nil {
 		hash := failoverConfigHash(cfg)
 		if hash != s.failoverHash {
@@ -105,7 +106,15 @@ func (s *Server) reload() error {
 				s.failoverCancel()
 				s.failoverCancel = nil
 			}
-			sites, err := failover.BuildSites(cfg, s.dnsClient)
+			var accounts []config.CFAccount
+			if s.store != nil {
+				if accts, err := s.store.GetCFAccounts(); err == nil {
+					accounts = accts
+				} else {
+					log.Printf("failover 读取 cf_accounts 失败（配额监控不可用）: %v", err)
+				}
+			}
+			sites, err := failover.BuildSites(cfg, s.dnsClient, accounts)
 			if err != nil {
 				log.Printf("failover 构建失败（保持原状态运行）: %v", err)
 			} else if len(sites) > 0 {
@@ -136,7 +145,7 @@ func (s *Server) reload() error {
 	var upstreams []*dataplane.Upstream
 	for _, sc := range cfg.Sites {
 		// failover 站点不进转发器（数据面直连，无转发）
-		if sc.Primary.Name != "" || sc.Backup.Name != "" {
+		if len(sc.Targets) > 0 {
 			continue
 		}
 		site := dataplane.NewSite(sc, cfg.Strategy, cfg.HealthPath, oldUpstreams)

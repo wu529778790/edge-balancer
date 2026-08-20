@@ -73,9 +73,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Write(adminHTML)
 }
 
-// serveFailoverAPI DNS 故障切换接口（新架构）
+// serveFailoverAPI DNS 配额轮换接口（新架构）
 // GET  {admin_path}/api/failover                       → 全部站点状态
-// POST {admin_path}/api/failover/{domain}/switch?target=primary|backup → 手动切换（进入手动模式）
+// POST {admin_path}/api/failover/{domain}/switch?target=<index> → 手动切换（进入手动模式）
 // POST {admin_path}/api/failover/{domain}/auto         → 恢复自动
 // GET/POST {admin_path}/api/failover/sites             → failover 站点配置列表/新建（需 DB 模式）
 // PUT/DELETE {admin_path}/api/failover/sites/{id}      → 更新/删除 failover 站点配置
@@ -90,7 +90,7 @@ func (h *Handler) serveFailoverAPI(w http.ResponseWriter, r *http.Request, cfg *
 
 	mgr := h.failover()
 	if mgr == nil {
-		http.Error(w, "failover 未启用（配置 primary/backup 后启用）", http.StatusNotImplemented)
+		http.Error(w, "failover 未启用（配置 targets 目标队列后启用）", http.StatusNotImplemented)
 		return
 	}
 
@@ -119,8 +119,12 @@ func (h *Handler) serveFailoverAPI(w http.ResponseWriter, r *http.Request, cfg *
 	}
 	switch seg[1] {
 	case "switch":
-		target := r.URL.Query().Get("target")
-		if err := site.ManualSwitch(target); err != nil {
+		idx, err := strconv.Atoi(r.URL.Query().Get("target"))
+		if err != nil {
+			http.Error(w, "target 必须是目标下标（0..N-1）", http.StatusBadRequest)
+			return
+		}
+		if err := site.ManualSwitch(idx); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -161,9 +165,15 @@ func (h *Handler) handleFailoverSitesAPI(w http.ResponseWriter, r *http.Request,
 				http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
 				return
 			}
-			if in.Domain == "" || in.PrimaryName == "" || in.PrimaryDNSContent == "" || in.BackupName == "" || in.BackupDNSContent == "" {
-				http.Error(w, "domain / primary(name+dns_content) / backup(name+dns_content) 必填", http.StatusBadRequest)
+			if in.Domain == "" || len(in.Targets) < 2 {
+				http.Error(w, "domain 与至少 2 个 targets（name + dns_content）必填", http.StatusBadRequest)
 				return
+			}
+			for j, t := range in.Targets {
+				if t.Name == "" || t.DNSContent == "" {
+					http.Error(w, fmt.Sprintf("targets[%d] 需要 name 和 dns_content", j), http.StatusBadRequest)
+					return
+				}
 			}
 			id, err := h.store.CreateFailoverSite(in)
 			if err != nil {
@@ -206,6 +216,10 @@ func (h *Handler) handleFailoverSitesAPI(w http.ResponseWriter, r *http.Request,
 				return
 			}
 			in.ID = id
+			if len(in.Targets) < 2 {
+				http.Error(w, "至少 2 个 targets", http.StatusBadRequest)
+				return
+			}
 			if err := h.store.UpdateFailoverSite(in); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -548,13 +562,19 @@ func (h *Handler) handleCFAPI(w http.ResponseWriter, r *http.Request, seg []stri
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		// 安全：token 明文不回传前端（只保留 token_env 环境变量名）
+		safe := make([]config.CFAccount, len(accounts))
+		for i, a := range accounts {
+			a.Token = ""
+			safe[i] = a
+		}
 		autoOff, _ := h.store.GetAutoOff()
 		usages := cf.QueryAllUsages(accounts)
 		for i := range usages {
 			usages[i].AutoOff = len(autoOff[usages[i].Name]) > 0
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"accounts": accounts,
+			"accounts": safe,
 			"usages":   usages,
 		})
 		return

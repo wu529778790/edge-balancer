@@ -30,20 +30,27 @@ type SiteConfig struct {
 	HealthPath string           `yaml:"health_path"` // 该站点健康检查路径（空则用全局 health_path）
 	Upstreams  []UpstreamConfig `yaml:"upstreams"`   // 该站点的上游列表（旧转发模型）
 
-	// DNS 故障切换模型（新架构）：配置了 Primary/Backup 的站点走 failover，不参与转发。
-	// 数据面用户直连 DNS 指向的目标；本程序只做探测 + 切换 DNS 记录。
-	Primary TargetConfig `yaml:"primary"` // 主目标：DNS 平时指向它
-	Backup  TargetConfig `yaml:"backup"`  // 备目标：主挂时切换指向它
-	Probe   ProbeConfig  `yaml:"probe"`   // 探测参数（缺省用全局默认）
+	// DNS 配额轮换队列（新架构）：配置了 Targets 的站点走 failover，不参与转发。
+	// 有序队列从前到后消费：配额用尽或故障 → 切下一个目标；配额每日重置 → 切回最早可用。
+	// 数据面用户直连 DNS 指向的目标；本程序只做探测 + 配额监控 + 切换 DNS 记录。
+	Targets []TargetConfig `yaml:"targets"` // 目标队列（有序）
+	Probe   ProbeConfig    `yaml:"probe"`   // 探测参数（缺省用全局默认）
+
+	// 兼容旧配置：primary/backup 在 Normalize 时转换为 targets[0]/[1]（新配置请直接用 targets）
+	Primary TargetConfig `yaml:"primary"`
+	Backup  TargetConfig `yaml:"backup"`
 }
 
-// TargetConfig DNS 故障切换的目标：一条 DNS 记录在「主/备」之间切换指向
+// TargetConfig DNS 配额轮换队列中的一个目标：一条 DNS 记录可在多个目标间切换指向。
+// QuotaAccount 非空时该目标受 CF 免费配额约束（引 cf_accounts 账号），配额超限自动切下一个；
+// 为空 = 无限额度兜底（如服务器 IP），只受健康约束。
 type TargetConfig struct {
-	Name       string `yaml:"name"`        // 目标名称（面板展示）
-	RecordType string `yaml:"record_type"` // 切换后记录类型：主通常 CNAME、备通常 A
-	DNSContent string `yaml:"dns_content"` // 切换后记录的 content：CNAME → 目标域名；A → IP
-	URL        string `yaml:"url"`         // 探测用 URL（备目标通常本地源站 http://127.0.0.1:<port>）
-	Health     string `yaml:"health"`      // 探测路径（默认用全局 health_path）
+	Name         string `yaml:"name"`          // 目标名称（面板展示）
+	RecordType   string `yaml:"record_type"`   // 切换后记录类型：worker 通常 CNAME、服务器通常 A
+	DNSContent   string `yaml:"dns_content"`   // 切换后记录的 content：CNAME → 目标域名；A → IP
+	URL          string `yaml:"url"`           // 探测用 URL（服务器目标通常本地 http://127.0.0.1:<port>）
+	Health       string `yaml:"health"`        // 探测路径（默认用全局 health_path）
+	QuotaAccount string `yaml:"quota_account"` // 配额信号：引 cf_accounts 账号名；空=无限额度兜底
 }
 
 // ProbeConfig 探测与切换防抖参数
@@ -54,6 +61,7 @@ type ProbeConfig struct {
 	FailThreshold    int    `yaml:"fail_threshold"`        // 判挂：连续失败次数，默认 3
 	RecoverThreshold int    `yaml:"recover_threshold"`     // 判恢复：连续成功次数，默认 10
 	Cooldown         int    `yaml:"cooldown"`              // 一次切换后冷却秒（防抖），默认 120
+	QuotaInterval    int    `yaml:"quota_interval"`        // 配额查询间隔秒（节流 CF API），默认 300
 	LatencyThreshold int    `yaml:"latency_threshold_ms"`  // 慢阈值 ms，默认 0=不启用；>0 时连续超阈判慢挂
 }
 
@@ -80,12 +88,14 @@ type Config struct {
 	Sites          []SiteConfig `yaml:"sites"`           // 站点列表（按域名路由）
 }
 
-// CFAccount Cloudflare 账号配额配置（settings.cf_accounts 的 JSON 载体）
+// CFAccount Cloudflare 账号配额配置（settings.cf_accounts 的 JSON 载体）。
+// Token 建议用 TokenEnv 从环境变量读取（不落盘）；Token 字段兼容旧数据（明文，弃用）。
 type CFAccount struct {
 	Name      string `json:"name"`
-	Token     string `json:"token"`
+	Token     string `json:"token"`     // 兼容旧字段（明文存储，弃用）；优先 token_env
+	TokenEnv  string `json:"token_env"` // 新：该账号配额查询 token 的环境变量名（如 CF_TOKEN_<NAME>）
 	AccountID string `json:"account_id"`
-	Quota     int64  `json:"quota"`     // 每月免费额度（请求数），默认 100000
+	Quota     int64  `json:"quota"`     // 每日免费额度（请求数），默认 100000
 	Threshold int    `json:"threshold"` // 使用率阈值 %，默认 90
 }
 
@@ -124,8 +134,16 @@ func Normalize(cfg *Config) {
 	}
 	for i := range cfg.Sites {
 		site := &cfg.Sites[i]
-		// 新架构（failover）站点默认值
-		if site.Primary.Name != "" || site.Backup.Name != "" {
+		// 新架构（failover）站点默认值；旧 primary/backup 配置兼容转换为 targets 队列
+		if site.Primary.Name != "" || site.Backup.Name != "" || len(site.Targets) > 0 {
+			if len(site.Targets) == 0 {
+				if site.Primary.Name != "" {
+					site.Targets = append(site.Targets, site.Primary)
+				}
+				if site.Backup.Name != "" {
+					site.Targets = append(site.Targets, site.Backup)
+				}
+			}
 			if site.Probe.Mode == "" {
 				site.Probe.Mode = "server"
 			}
@@ -144,23 +162,20 @@ func Normalize(cfg *Config) {
 			if site.Probe.Cooldown <= 0 {
 				site.Probe.Cooldown = 120
 			}
-			if site.Primary.Health == "" {
-				site.Primary.Health = site.HealthPath
+			if site.Probe.QuotaInterval <= 0 {
+				site.Probe.QuotaInterval = 300
 			}
-			if site.Backup.Health == "" {
-				site.Backup.Health = site.HealthPath
-			}
-			if site.Primary.Health == "" {
-				site.Primary.Health = cfg.HealthPath
-			}
-			if site.Backup.Health == "" {
-				site.Backup.Health = cfg.HealthPath
-			}
-			if site.Primary.RecordType == "" {
-				site.Primary.RecordType = "CNAME"
-			}
-			if site.Backup.RecordType == "" {
-				site.Backup.RecordType = "A"
+			for j := range site.Targets {
+				t := &site.Targets[j]
+				if t.Health == "" {
+					t.Health = site.HealthPath
+				}
+				if t.Health == "" {
+					t.Health = cfg.HealthPath
+				}
+				if t.RecordType == "" {
+					t.RecordType = "CNAME"
+				}
 			}
 		}
 		// 旧架构（转发）站点默认值
@@ -185,16 +200,24 @@ func Validate(cfg *Config) error {
 			return fmt.Errorf("site 域名重复: %s", site.Domain)
 		}
 		seen[site.Domain] = true
-		// failover 站点校验：主目标必填名称与 DNS 指向；主备互斥于旧 upstreams
-		if site.Primary.Name != "" || site.Backup.Name != "" {
-			if site.Primary.Name == "" || site.Primary.DNSContent == "" {
-				return fmt.Errorf("site %s 的 primary 需要 name 和 dns_content", site.Domain)
+		// failover 站点校验：目标队列至少 2 个；与旧 upstreams 互斥
+		if len(site.Targets) > 0 {
+			if len(site.Targets) < 2 {
+				return fmt.Errorf("site %s 至少配置 2 个 targets（否则无切换意义）", site.Domain)
 			}
-			if site.Backup.Name == "" || site.Backup.DNSContent == "" {
-				return fmt.Errorf("site %s 的 backup 需要 name 和 dns_content", site.Domain)
+			for j, t := range site.Targets {
+				if t.Name == "" {
+					return fmt.Errorf("site %s 的 targets[%d] 缺少 name", site.Domain, j)
+				}
+				if t.DNSContent == "" {
+					return fmt.Errorf("site %s 的 targets[%d] 缺少 dns_content", site.Domain, j)
+				}
+				if t.QuotaAccount != "" && t.RecordType == "" {
+					return fmt.Errorf("site %s 的 targets[%d] 缺少 record_type", site.Domain, j)
+				}
 			}
 			if len(site.Upstreams) > 0 {
-				return fmt.Errorf("site %s 不能同时配置 upstreams 与 primary/backup（二选一）", site.Domain)
+				return fmt.Errorf("site %s 不能同时配置 upstreams 与 targets（二选一）", site.Domain)
 			}
 		}
 		for j := range site.Upstreams {
