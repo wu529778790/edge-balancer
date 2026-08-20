@@ -75,9 +75,9 @@ func failoverConfigHash(cfg *config.Config) string {
 		if len(sc.Targets) == 0 {
 			continue
 		}
-		fmt.Fprintf(&sb, "%s|%d|", sc.Domain, len(sc.Targets))
+		fmt.Fprintf(&sb, "%s|%s|%d|", sc.Domain, sc.RoutePattern, len(sc.Targets))
 		for _, t := range sc.Targets {
-			fmt.Fprintf(&sb, "%s|%s|%s|%s|%s|%s|", t.Name, t.RecordType, t.DNSContent, t.URL, t.Health, t.QuotaAccount)
+			fmt.Fprintf(&sb, "%s|%s|%s|%s|%s|%s|%s|", t.Name, t.RecordType, t.DNSContent, t.URL, t.Health, t.QuotaAccount, t.Script)
 		}
 		fmt.Fprintf(&sb, "%s|%d|%d|%d|%d|%d|%d|",
 			sc.Probe.Mode, sc.Probe.Interval, sc.Probe.Timeout, sc.Probe.FailThreshold, sc.Probe.RecoverThreshold, sc.Probe.Cooldown, sc.Probe.QuotaInterval)

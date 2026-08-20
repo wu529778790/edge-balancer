@@ -83,6 +83,8 @@ CREATE INDEX IF NOT EXISTS idx_upstreams_site ON upstreams(site_id);
 CREATE TABLE IF NOT EXISTS failover_sites (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   domain TEXT NOT NULL UNIQUE,
+  route_pattern TEXT NOT NULL DEFAULT '',
+  targets TEXT NOT NULL DEFAULT '',
   primary_name TEXT NOT NULL,
   primary_record_type TEXT NOT NULL DEFAULT 'CNAME',
   primary_dns_content TEXT NOT NULL,
@@ -125,6 +127,17 @@ CREATE TABLE IF NOT EXISTS failover_sites (
 	}
 	if !has {
 		_, err = s.db.Exec(`ALTER TABLE failover_sites ADD COLUMN targets TEXT NOT NULL DEFAULT ''`)
+		if err != nil {
+			return err
+		}
+	}
+	// failover_sites 升级：加 route_pattern 列（站点级 Workers Route pattern）
+	has, err = s.columnExists("failover_sites", "route_pattern")
+	if err != nil {
+		return err
+	}
+	if !has {
+		_, err = s.db.Exec(`ALTER TABLE failover_sites ADD COLUMN route_pattern TEXT NOT NULL DEFAULT ''`)
 		if err != nil {
 			return err
 		}
@@ -322,8 +335,9 @@ func (s *Store) LoadConfig() (*config.Config, error) {
 		}
 		foDomains[fo.Domain] = true
 		cfg.Sites = append(cfg.Sites, config.SiteConfig{
-			Domain: fo.Domain,
-			Targets: targets,
+			Domain:       fo.Domain,
+			RoutePattern: fo.RoutePattern,
+			Targets:      targets,
 			Probe: config.ProbeConfig{
 				Mode: fo.ProbeMode, Interval: fo.ProbeInterval, Timeout: fo.ProbeTimeout,
 				FailThreshold: fo.ProbeFailThreshold, RecoverThreshold: fo.ProbeRecoverThreshold,
@@ -478,6 +492,9 @@ type FailoverSiteRecord struct {
 	ID     int64  `json:"id"`
 	Domain string `json:"domain"`
 
+	// 站点级 Workers Route pattern（如 parse.shenzjd.com/*）；切换 = 增删/改指向这条 route
+	RoutePattern string `json:"route_pattern"`
+
 	// 目标队列（JSON 数组，新模型）；为空时回退旧 primary/backup 字段
 	Targets []config.TargetConfig `json:"targets"`
 
@@ -505,7 +522,7 @@ type FailoverSiteRecord struct {
 
 // ListFailoverSites 读取全部 failover 站点（targets 为空时回退旧 primary/backup 字段）
 func (s *Store) ListFailoverSites() ([]FailoverSiteRecord, error) {
-	rows, err := s.db.Query(`SELECT id, domain, targets,
+	rows, err := s.db.Query(`SELECT id, domain, route_pattern, targets,
 		primary_name, primary_record_type, primary_dns_content, primary_url, primary_health,
 		backup_name, backup_record_type, backup_dns_content, backup_url, backup_health,
 		probe_mode, probe_interval, probe_timeout, probe_fail_threshold, probe_recover_threshold, probe_cooldown, probe_quota_interval
@@ -518,7 +535,7 @@ func (s *Store) ListFailoverSites() ([]FailoverSiteRecord, error) {
 	for rows.Next() {
 		var r FailoverSiteRecord
 		var targetsRaw string
-		if err := rows.Scan(&r.ID, &r.Domain, &targetsRaw,
+		if err := rows.Scan(&r.ID, &r.Domain, &r.RoutePattern, &targetsRaw,
 			&r.PrimaryName, &r.PrimaryRecordType, &r.PrimaryDNSContent, &r.PrimaryURL, &r.PrimaryHealth,
 			&r.BackupName, &r.BackupRecordType, &r.BackupDNSContent, &r.BackupURL, &r.BackupHealth,
 			&r.ProbeMode, &r.ProbeInterval, &r.ProbeTimeout, &r.ProbeFailThreshold, &r.ProbeRecoverThreshold, &r.ProbeCooldown, &r.ProbeQuotaInterval); err != nil {
@@ -541,12 +558,12 @@ func (s *Store) CreateFailoverSite(r FailoverSiteRecord) (int64, error) {
 		return 0, err
 	}
 	res, err := s.db.Exec(`INSERT INTO failover_sites(
-		domain, targets,
+		domain, route_pattern, targets,
 		primary_name, primary_record_type, primary_dns_content, primary_url, primary_health,
 		backup_name, backup_record_type, backup_dns_content, backup_url, backup_health,
 		probe_mode, probe_interval, probe_timeout, probe_fail_threshold, probe_recover_threshold, probe_cooldown, probe_quota_interval)
-		VALUES(?, ?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?,?)`,
-		r.Domain, string(targetsRaw),
+		VALUES(?, ?, ?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?,?)`,
+		r.Domain, r.RoutePattern, string(targetsRaw),
 		r.PrimaryName, r.PrimaryRecordType, r.PrimaryDNSContent, r.PrimaryURL, r.PrimaryHealth,
 		r.BackupName, r.BackupRecordType, r.BackupDNSContent, r.BackupURL, r.BackupHealth,
 		r.ProbeMode, r.ProbeInterval, r.ProbeTimeout, r.ProbeFailThreshold, r.ProbeRecoverThreshold, r.ProbeCooldown, r.ProbeQuotaInterval)
@@ -563,13 +580,13 @@ func (s *Store) UpdateFailoverSite(r FailoverSiteRecord) error {
 		return err
 	}
 	_, err = s.db.Exec(`UPDATE failover_sites SET
-		domain=?, targets=?,
+		domain=?, route_pattern=?, targets=?,
 		primary_name=?, primary_record_type=?, primary_dns_content=?, primary_url=?, primary_health=?,
 		backup_name=?, backup_record_type=?, backup_dns_content=?, backup_url=?, backup_health=?,
 		probe_mode=?, probe_interval=?, probe_timeout=?, probe_fail_threshold=?, probe_recover_threshold=?, probe_cooldown=?, probe_quota_interval=?,
 		updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
 		WHERE id=?`,
-		r.Domain, string(targetsRaw),
+		r.Domain, r.RoutePattern, string(targetsRaw),
 		r.PrimaryName, r.PrimaryRecordType, r.PrimaryDNSContent, r.PrimaryURL, r.PrimaryHealth,
 		r.BackupName, r.BackupRecordType, r.BackupDNSContent, r.BackupURL, r.BackupHealth,
 		r.ProbeMode, r.ProbeInterval, r.ProbeTimeout, r.ProbeFailThreshold, r.ProbeRecoverThreshold, r.ProbeCooldown, r.ProbeQuotaInterval,

@@ -30,8 +30,7 @@ func testStore(t *testing.T) *Store {
 
 func sampleTargets() []config.TargetConfig {
 	return []config.TargetConfig{
-		{Name: "worker-a", RecordType: "CNAME", DNSContent: "parse-shenzjd-com.shenzjd.workers.dev", URL: "https://parse-shenzjd-com.shenzjd.workers.dev", Health: "/api/health", QuotaAccount: "shenzjd"},
-		{Name: "worker-b", RecordType: "CNAME", DNSContent: "parse-shenzjd-com.2509818162.workers.dev", URL: "https://parse-shenzjd-com.2509818162.workers.dev", Health: "/api/health", QuotaAccount: "2509818162"},
+		{Name: "worker-a", RecordType: "CNAME", DNSContent: "parse-shenzjd-com.shenzjd.workers.dev", URL: "https://parse-shenzjd-com.shenzjd.workers.dev", Health: "/api/health", QuotaAccount: "shenzjd", Script: "parse-shenzjd-com"},
 		{Name: "server", RecordType: "A", DNSContent: "43.128.70.75", URL: "http://127.0.0.1:5269", Health: "/api/health"},
 	}
 }
@@ -41,9 +40,10 @@ func TestFailoverSitesCRUD(t *testing.T) {
 	s := testStore(t)
 
 	r := FailoverSiteRecord{
-		Domain:  "parse.shenzjd.com",
-		Targets: sampleTargets(),
-		ProbeMode: "server", ProbeInterval: 10, ProbeTimeout: 10,
+		Domain:       "parse.shenzjd.com",
+		RoutePattern: "parse.shenzjd.com/*",
+		Targets:      sampleTargets(),
+		ProbeMode:    "server", ProbeInterval: 10, ProbeTimeout: 10,
 		ProbeFailThreshold: 3, ProbeCooldown: 120, ProbeQuotaInterval: 300,
 	}
 	id, err := s.CreateFailoverSite(r)
@@ -58,10 +58,13 @@ func TestFailoverSitesCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("列表: %v", err)
 	}
-	if len(list) != 1 || list[0].Domain != "parse.shenzjd.com" || len(list[0].Targets) != 3 {
+	if len(list) != 1 || list[0].Domain != "parse.shenzjd.com" || len(list[0].Targets) != 2 {
 		t.Fatalf("列表内容异常: %+v", list)
 	}
-	if list[0].Targets[0].DNSContent != "parse-shenzjd-com.shenzjd.workers.dev" || list[0].Targets[0].QuotaAccount != "shenzjd" {
+	if list[0].RoutePattern != "parse.shenzjd.com/*" {
+		t.Fatalf("route_pattern 往返异常: %q", list[0].RoutePattern)
+	}
+	if list[0].Targets[0].DNSContent != "parse-shenzjd-com.shenzjd.workers.dev" || list[0].Targets[0].QuotaAccount != "shenzjd" || list[0].Targets[0].Script != "parse-shenzjd-com" {
 		t.Fatalf("targets 序列化往返异常: %+v", list[0].Targets)
 	}
 
@@ -90,9 +93,10 @@ func TestFailoverSitesCRUD(t *testing.T) {
 func TestLoadConfigBuildsFailover(t *testing.T) {
 	s := testStore(t)
 	if _, err := s.CreateFailoverSite(FailoverSiteRecord{
-		Domain:  "parse.shenzjd.com",
-		Targets: sampleTargets(),
-		ProbeMode: "server", ProbeInterval: 10, ProbeTimeout: 10,
+		Domain:       "parse.shenzjd.com",
+		RoutePattern: "parse.shenzjd.com/*",
+		Targets:      sampleTargets(),
+		ProbeMode:    "server", ProbeInterval: 10, ProbeTimeout: 10,
 		ProbeFailThreshold: 3, ProbeCooldown: 120, ProbeQuotaInterval: 300,
 	}); err != nil {
 		t.Fatal(err)
@@ -119,11 +123,14 @@ func TestLoadConfigBuildsFailover(t *testing.T) {
 	for _, sc := range cfg.Sites {
 		if len(sc.Targets) > 0 {
 			fo++
-			if len(sc.Targets) != 3 || sc.Targets[0].DNSContent != "parse-shenzjd-com.shenzjd.workers.dev" || sc.Targets[2].DNSContent != "43.128.70.75" {
+			if len(sc.Targets) != 2 || sc.Targets[0].DNSContent != "parse-shenzjd-com.shenzjd.workers.dev" || sc.Targets[1].DNSContent != "43.128.70.75" {
 				t.Fatalf("targets 解析异常: %+v", sc.Targets)
 			}
-			if sc.Targets[0].QuotaAccount != "shenzjd" || sc.Targets[2].QuotaAccount != "" {
-				t.Fatalf("quota_account 解析异常: %+v", sc.Targets)
+			if sc.RoutePattern != "parse.shenzjd.com/*" {
+				t.Fatalf("route_pattern 解析异常: %q", sc.RoutePattern)
+			}
+			if sc.Targets[0].QuotaAccount != "shenzjd" || sc.Targets[0].Script != "parse-shenzjd-com" || sc.Targets[1].Script != "" {
+				t.Fatalf("quota/script 解析异常: %+v", sc.Targets)
 			}
 			if sc.Probe.FailThreshold != 3 || sc.Probe.Cooldown != 120 || sc.Probe.QuotaInterval != 300 {
 				t.Fatalf("probe 解析异常: %+v", sc.Probe)

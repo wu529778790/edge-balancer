@@ -14,28 +14,38 @@ import (
 	"github.com/wu529778790/edge-balancer/internal/dns"
 )
 
-// fakeSwitcher 记录 PatchRecord 调用（不真调 CF API）；可注入错误模拟 PATCH 失败
+// fakeSwitcher 模拟 Workers Route 操作（不真调 CF API）；可注入错误模拟切换失败
 type fakeSwitcher struct {
-	patchCalls  int32
-	patchErr    error
-	lastType    string
-	lastContent string
-	record      dns.Record
+	route   *dns.WorkerRoute // 当前存在的 route（pattern 匹配）
+	putCalls int32
+	delCalls int32
+	putErr   error
+	delErr   error
 }
 
-func (f *fakeSwitcher) PatchRecord(zoneID, recordID, rtype, content string, ttl int, keepProxy bool) (*dns.Record, error) {
-	atomic.AddInt32(&f.patchCalls, 1)
-	if f.patchErr != nil {
-		return nil, f.patchErr
+func (f *fakeSwitcher) ListRoutes(zoneID string) ([]dns.WorkerRoute, error) {
+	if f.route != nil {
+		return []dns.WorkerRoute{*f.route}, nil
 	}
-	f.lastType = rtype
-	f.lastContent = content
-	f.record = dns.Record{ID: recordID, Type: rtype, Name: recordID, Content: content, TTL: ttl}
-	return &f.record, nil
+	return nil, nil
 }
 
-func (f *fakeSwitcher) GetRecord(zoneID, recordID string) (*dns.Record, error) {
-	return &f.record, nil
+func (f *fakeSwitcher) PutRoute(zoneID, pattern, script string) error {
+	atomic.AddInt32(&f.putCalls, 1)
+	if f.putErr != nil {
+		return f.putErr
+	}
+	f.route = &dns.WorkerRoute{ID: "r1", Pattern: pattern, Script: script}
+	return nil
+}
+
+func (f *fakeSwitcher) DeleteRoute(zoneID, pattern string) error {
+	atomic.AddInt32(&f.delCalls, 1)
+	if f.delErr != nil {
+		return f.delErr
+	}
+	f.route = nil
+	return nil
 }
 
 // fakeQuota 可控配额查询（按账号名）
@@ -53,18 +63,18 @@ func (f *fakeQuota) query(acc config.CFAccount) (cf.Usage, error) {
 	return u, nil
 }
 
-// mkSite 构造 3 目标队列站点：worker-a（accA）→ worker-b（accB）→ server（无限额度）
+// mkSite 构造 3 目标队列站点：worker-a（accA）→ worker-b（accB）→ server（无限额度兜底）
 func mkSite(primaryURL, backupURL string, probe config.ProbeConfig, sw Switcher, q QuotaQuery) *Site {
 	targets := []config.TargetConfig{
-		{Name: "worker-a", RecordType: "CNAME", DNSContent: "a.workers.dev", URL: primaryURL, Health: "/api/health", QuotaAccount: "accA"},
-		{Name: "worker-b", RecordType: "CNAME", DNSContent: "b.workers.dev", URL: backupURL, Health: "/api/health", QuotaAccount: "accB"},
+		{Name: "worker-a", RecordType: "CNAME", DNSContent: "a.workers.dev", URL: primaryURL, Health: "/api/health", QuotaAccount: "accA", Script: "worker-a-script"},
+		{Name: "worker-b", RecordType: "CNAME", DNSContent: "b.workers.dev", URL: backupURL, Health: "/api/health", QuotaAccount: "accB", Script: "worker-b-script"},
 		{Name: "server", RecordType: "A", DNSContent: "1.2.3.4", URL: backupURL, Health: "/api/health"},
 	}
 	accounts := []config.CFAccount{
 		{Name: "accA", Quota: 100000, Threshold: 90},
 		{Name: "accB", Quota: 100000, Threshold: 90},
 	}
-	s, err := NewSite("a.test", targets, accounts, probe, sw, "zone1", "rec1", 60, false, q)
+	s, err := NewSite("a.test", "a.test/*", targets, accounts, probe, sw, "zone1", false, q)
 	if err != nil {
 		panic(err)
 	}
@@ -128,26 +138,29 @@ func TestProbeTimeoutNotFail(t *testing.T) {
 	}
 }
 
-// 配额推进：A 配额超限 → 切到 B
+// 配额推进：A 配额超限 → route 切到 worker-b
 func TestQuotaTrip(t *testing.T) {
 	up := upSrv()
 	defer up.Close()
 	q := &fakeQuota{usages: map[string]cf.Usage{"accA": {Used: 95000, Quota: 100000, Percent: 95, OverLimit: true}}}
-	sw := &fakeSwitcher{record: dns.Record{Type: "CNAME", Content: "a.workers.dev"}}
+	sw := &fakeSwitcher{route: &dns.WorkerRoute{ID: "r1", Pattern: "a.test/*", Script: "worker-a-script"}}
 	s := mkSite(up.URL, up.URL, defaultProbe(), sw, q.query)
 
 	s.mu.Lock()
 	s.tick()
 	s.mu.Unlock()
 	if s.currentIndex != 1 {
-		t.Fatalf("A 配额超限应切到 B（index 1），实际 index=%d", s.currentIndex)
+		t.Fatalf("A 配额超限应切到 worker-b（index 1），实际 index=%d", s.currentIndex)
 	}
-	if sw.lastContent != "b.workers.dev" || sw.lastType != "CNAME" {
-		t.Fatalf("应 PATCH CNAME→b.workers.dev，实际 %s→%s", sw.lastType, sw.lastContent)
+	if sw.route == nil || sw.route.Script != "worker-b-script" {
+		t.Fatalf("route 应指向 worker-b-script，实际 %+v", sw.route)
+	}
+	if sw.putCalls == 0 {
+		t.Fatalf("应调用 PutRoute")
 	}
 }
 
-// 配额链式：A、B 都超限 → 直接切到兜底 server
+// 配额链式：A、B 都超限 → 删除 route 切到服务器兜底
 func TestQuotaChainToFallback(t *testing.T) {
 	up := upSrv()
 	defer up.Close()
@@ -155,7 +168,7 @@ func TestQuotaChainToFallback(t *testing.T) {
 		"accA": {Used: 95000, Quota: 100000, Percent: 95, OverLimit: true},
 		"accB": {Used: 98000, Quota: 100000, Percent: 98, OverLimit: true},
 	}}
-	sw := &fakeSwitcher{record: dns.Record{Type: "CNAME", Content: "a.workers.dev"}}
+	sw := &fakeSwitcher{route: &dns.WorkerRoute{ID: "r1", Pattern: "a.test/*", Script: "worker-a-script"}}
 	s := mkSite(up.URL, up.URL, defaultProbe(), sw, q.query)
 
 	s.mu.Lock()
@@ -164,8 +177,11 @@ func TestQuotaChainToFallback(t *testing.T) {
 	if s.currentIndex != 2 {
 		t.Fatalf("A/B 均超限应切到 server（index 2），实际 index=%d", s.currentIndex)
 	}
-	if sw.lastContent != "1.2.3.4" || sw.lastType != "A" {
-		t.Fatalf("应 PATCH A→1.2.3.4，实际 %s→%s", sw.lastType, sw.lastContent)
+	if sw.route != nil {
+		t.Fatalf("切服务器应删除 route，实际 %+v", sw.route)
+	}
+	if sw.delCalls == 0 {
+		t.Fatalf("应调用 DeleteRoute")
 	}
 }
 
@@ -174,7 +190,7 @@ func TestQuotaOKNoTrip(t *testing.T) {
 	up := upSrv()
 	defer up.Close()
 	q := &fakeQuota{usages: map[string]cf.Usage{"accA": {Used: 10000, Quota: 100000, Percent: 10, OverLimit: false}}}
-	sw := &fakeSwitcher{record: dns.Record{Type: "CNAME", Content: "a.workers.dev"}}
+	sw := &fakeSwitcher{route: &dns.WorkerRoute{ID: "r1", Pattern: "a.test/*", Script: "worker-a-script"}}
 	s := mkSite(up.URL, up.URL, defaultProbe(), sw, q.query)
 
 	s.mu.Lock()
@@ -183,8 +199,8 @@ func TestQuotaOKNoTrip(t *testing.T) {
 	if s.currentIndex != 0 {
 		t.Fatalf("配额正常不应切换，实际 index=%d", s.currentIndex)
 	}
-	if sw.patchCalls != 0 {
-		t.Fatalf("不应有 PATCH 调用")
+	if sw.putCalls+sw.delCalls != 0 {
+		t.Fatalf("不应有 route 操作")
 	}
 }
 
@@ -195,7 +211,7 @@ func TestHealthTrip(t *testing.T) {
 	defer down.Close()
 	defer up.Close()
 	q := &fakeQuota{usages: map[string]cf.Usage{}}
-	sw := &fakeSwitcher{record: dns.Record{Type: "CNAME", Content: "a.workers.dev"}}
+	sw := &fakeSwitcher{route: &dns.WorkerRoute{ID: "r1", Pattern: "a.test/*", Script: "worker-a-script"}}
 	s := mkSite(down.URL, up.URL, defaultProbe(), sw, q.query)
 
 	for i := 0; i < 3; i++ {
@@ -206,8 +222,8 @@ func TestHealthTrip(t *testing.T) {
 	if s.currentIndex != 1 {
 		t.Fatalf("A 连续失败 3 次应切到 B，实际 index=%d", s.currentIndex)
 	}
-	if sw.lastContent != "b.workers.dev" {
-		t.Fatalf("应 PATCH 到 B，实际 %s", sw.lastContent)
+	if sw.route == nil || sw.route.Script != "worker-b-script" {
+		t.Fatalf("route 应指向 worker-b-script，实际 %+v", sw.route)
 	}
 }
 
@@ -218,7 +234,7 @@ func TestNoTripBelowThreshold(t *testing.T) {
 	defer down.Close()
 	defer up.Close()
 	q := &fakeQuota{usages: map[string]cf.Usage{}}
-	sw := &fakeSwitcher{record: dns.Record{Type: "CNAME", Content: "a.workers.dev"}}
+	sw := &fakeSwitcher{route: &dns.WorkerRoute{ID: "r1", Pattern: "a.test/*", Script: "worker-a-script"}}
 	s := mkSite(down.URL, up.URL, defaultProbe(), sw, q.query)
 
 	for i := 0; i < 2; i++ {
@@ -231,15 +247,15 @@ func TestNoTripBelowThreshold(t *testing.T) {
 	}
 }
 
-// 每日回切：跨天后 A 配额恢复 → 从 server 切回 A
+// 每日回切：跨天后 A 配额恢复 → 从 server 切回 A（PutRoute）
 func TestDailyResetBackToFirst(t *testing.T) {
 	up := upSrv()
 	defer up.Close()
 	q := &fakeQuota{usages: map[string]cf.Usage{}}
-	sw := &fakeSwitcher{record: dns.Record{Type: "A", Content: "1.2.3.4"}}
+	sw := &fakeSwitcher{} // 无 route = 服务器兜底
 	s := mkSite(up.URL, up.URL, defaultProbe(), sw, q.query)
 	s.mu.Lock()
-	s.currentIndex = 2 // 当前指向 server
+	s.currentIndex = 2
 	s.lastCheckDay = "2000-01-01"
 	s.mu.Unlock()
 
@@ -249,8 +265,8 @@ func TestDailyResetBackToFirst(t *testing.T) {
 	if s.currentIndex != 0 {
 		t.Fatalf("跨天应切回最早可用目标 A，实际 index=%d", s.currentIndex)
 	}
-	if sw.lastContent != "a.workers.dev" {
-		t.Fatalf("应 PATCH 回 A，实际 %s", sw.lastContent)
+	if sw.route == nil || sw.route.Script != "worker-a-script" {
+		t.Fatalf("应 PutRoute 到 worker-a-script，实际 %+v", sw.route)
 	}
 }
 
@@ -259,7 +275,7 @@ func TestDailyResetSkipsOverLimit(t *testing.T) {
 	up := upSrv()
 	defer up.Close()
 	q := &fakeQuota{usages: map[string]cf.Usage{"accA": {Used: 95000, Quota: 100000, Percent: 95, OverLimit: true}}}
-	sw := &fakeSwitcher{record: dns.Record{Type: "A", Content: "1.2.3.4"}}
+	sw := &fakeSwitcher{}
 	s := mkSite(up.URL, up.URL, defaultProbe(), sw, q.query)
 	s.mu.Lock()
 	s.currentIndex = 2
@@ -272,8 +288,8 @@ func TestDailyResetSkipsOverLimit(t *testing.T) {
 	if s.currentIndex != 1 {
 		t.Fatalf("A 仍超限应切回 B（index 1），实际 index=%d", s.currentIndex)
 	}
-	if sw.lastContent != "b.workers.dev" {
-		t.Fatalf("应 PATCH 到 B，实际 %s", sw.lastContent)
+	if sw.route == nil || sw.route.Script != "worker-b-script" {
+		t.Fatalf("应 PutRoute 到 worker-b-script，实际 %+v", sw.route)
 	}
 }
 
@@ -282,7 +298,7 @@ func TestCooldownBlocksSwitch(t *testing.T) {
 	up := upSrv()
 	defer up.Close()
 	q := &fakeQuota{usages: map[string]cf.Usage{"accA": {Used: 95000, Quota: 100000, Percent: 95, OverLimit: true}}}
-	sw := &fakeSwitcher{record: dns.Record{Type: "CNAME", Content: "a.workers.dev"}}
+	sw := &fakeSwitcher{route: &dns.WorkerRoute{ID: "r1", Pattern: "a.test/*", Script: "worker-a-script"}}
 	s := mkSite(up.URL, up.URL, defaultProbe(), sw, q.query)
 	s.mu.Lock()
 	s.cooldownUntil = time.Now().Add(5 * time.Second)
@@ -294,8 +310,8 @@ func TestCooldownBlocksSwitch(t *testing.T) {
 	if s.currentIndex != 0 {
 		t.Fatalf("冷却期内不应切换，实际 index=%d", s.currentIndex)
 	}
-	if sw.patchCalls != 0 {
-		t.Fatalf("冷却期内不应有 PATCH 调用")
+	if sw.putCalls+sw.delCalls != 0 {
+		t.Fatalf("冷却期内不应有 route 操作")
 	}
 }
 
@@ -306,7 +322,7 @@ func TestManualOverride(t *testing.T) {
 	defer down.Close()
 	defer up.Close()
 	q := &fakeQuota{usages: map[string]cf.Usage{"accA": {Used: 95000, Quota: 100000, Percent: 95, OverLimit: true}}}
-	sw := &fakeSwitcher{record: dns.Record{Type: "CNAME", Content: "a.workers.dev"}}
+	sw := &fakeSwitcher{route: &dns.WorkerRoute{ID: "r1", Pattern: "a.test/*", Script: "worker-a-script"}}
 	s := mkSite(down.URL, up.URL, defaultProbe(), sw, q.query)
 
 	if err := s.ManualSwitch(1); err != nil {
@@ -315,10 +331,9 @@ func TestManualOverride(t *testing.T) {
 	if s.state != StateManual || s.manualIndex != 1 {
 		t.Fatalf("手动切换后应 manual+1，实际 %s/%d", s.state, s.manualIndex)
 	}
-	if sw.lastContent != "b.workers.dev" {
-		t.Fatalf("手动切换应 PATCH 到 B，实际 %s", sw.lastContent)
+	if sw.route == nil || sw.route.Script != "worker-b-script" {
+		t.Fatalf("手动切换应 PutRoute 到 B，实际 %+v", sw.route)
 	}
-	// 主继续失败也不自动动
 	for i := 0; i < 5; i++ {
 		s.mu.Lock()
 		s.tick()
@@ -340,11 +355,12 @@ func TestManualSwitchOutOfRange(t *testing.T) {
 	}
 }
 
-// 恢复自动：按当前 DNS 实际指向对齐
+// 恢复自动：按当前 route 实际指向对齐
 func TestManualAuto(t *testing.T) {
 	up := upSrv()
 	defer up.Close()
-	sw := &fakeSwitcher{record: dns.Record{Type: "A", Content: "1.2.3.4"}}
+	// 当前无 route = 服务器兜底
+	sw := &fakeSwitcher{}
 	s := mkSite(up.URL, up.URL, defaultProbe(), sw, (&fakeQuota{}).query)
 	if err := s.ManualSwitch(2); err != nil {
 		t.Fatal(err)
@@ -358,12 +374,12 @@ func TestManualAuto(t *testing.T) {
 	}
 }
 
-// dry-run：自动切换只决策不 PATCH
-func TestDryRunDoesNotPatch(t *testing.T) {
+// dry-run：自动切换只决策不执行 route 操作
+func TestDryRunDoesNotExecute(t *testing.T) {
 	up := upSrv()
 	defer up.Close()
 	q := &fakeQuota{usages: map[string]cf.Usage{"accA": {Used: 95000, Quota: 100000, Percent: 95, OverLimit: true}}}
-	sw := &fakeSwitcher{record: dns.Record{Type: "CNAME", Content: "a.workers.dev"}}
+	sw := &fakeSwitcher{route: &dns.WorkerRoute{ID: "r1", Pattern: "a.test/*", Script: "worker-a-script"}}
 	s := mkSite(up.URL, up.URL, defaultProbe(), sw, q.query)
 	s.dryRun = true
 
@@ -373,13 +389,13 @@ func TestDryRunDoesNotPatch(t *testing.T) {
 	if s.currentIndex != 1 {
 		t.Fatalf("dry-run 也应完成状态迁移，实际 index=%d", s.currentIndex)
 	}
-	if sw.patchCalls != 0 {
-		t.Fatalf("dry-run 自动切换不应 PATCH，实际 %d 次", sw.patchCalls)
+	if sw.putCalls+sw.delCalls != 0 {
+		t.Fatalf("dry-run 自动切换不应执行 route 操作，实际 put=%d del=%d", sw.putCalls, sw.delCalls)
 	}
 }
 
 // dry-run：手动切换放行（人有意识的操作应真实生效）
-func TestDryRunManualStillPatches(t *testing.T) {
+func TestDryRunManualStillExecutes(t *testing.T) {
 	up := upSrv()
 	defer up.Close()
 	sw := &fakeSwitcher{}
@@ -389,32 +405,31 @@ func TestDryRunManualStillPatches(t *testing.T) {
 	if err := s.ManualSwitch(2); err != nil {
 		t.Fatal(err)
 	}
-	if sw.patchCalls != 1 {
-		t.Fatalf("dry-run 手动切换应真实 PATCH，实际 %d 次", sw.patchCalls)
+	if sw.delCalls != 1 {
+		t.Fatalf("dry-run 手动切换应真实执行 DeleteRoute，实际 del=%d", sw.delCalls)
 	}
 	if s.state != StateManual {
 		t.Fatalf("手动切换应进入 manual，实际 %s", s.state)
 	}
 }
 
-// PATCH 失败：回滚 currentIndex，状态机与真实 DNS 保持一致
-func TestPatchFailRollback(t *testing.T) {
+// route 操作失败：回滚 currentIndex，状态机与真实 route 保持一致
+func TestRouteFailRollback(t *testing.T) {
 	up := upSrv()
 	defer up.Close()
 	q := &fakeQuota{usages: map[string]cf.Usage{"accA": {Used: 95000, Quota: 100000, Percent: 95, OverLimit: true}}}
-	sw := &fakeSwitcher{patchErr: fmt.Errorf("cf api down"), record: dns.Record{Type: "CNAME", Content: "a.workers.dev"}}
+	sw := &fakeSwitcher{putErr: fmt.Errorf("cf api down"), route: &dns.WorkerRoute{ID: "r1", Pattern: "a.test/*", Script: "worker-a-script"}}
 	s := mkSite(up.URL, up.URL, defaultProbe(), sw, q.query)
 
 	s.mu.Lock()
 	err := s.doSwitch(1, "quota", "测试")
 	s.mu.Unlock()
 	if err == nil {
-		t.Fatalf("PATCH 失败应返回错误")
+		t.Fatalf("route 操作失败应返回错误")
 	}
 	if s.currentIndex != 0 {
-		t.Fatalf("PATCH 失败应回滚到原目标，实际 index=%d", s.currentIndex)
+		t.Fatalf("route 操作失败应回滚到原目标，实际 index=%d", s.currentIndex)
 	}
-	// 事件应记录失败
 	snap := s.Snapshot()
 	if len(snap.Events) == 0 || !strings.Contains(snap.Events[0].Detail, "切换失败") {
 		t.Fatalf("应记录失败事件，实际 %+v", snap.Events)
@@ -426,7 +441,7 @@ func TestAllDownNoSwitch(t *testing.T) {
 	down := downSrv(503)
 	defer down.Close()
 	q := &fakeQuota{usages: map[string]cf.Usage{"accA": {Used: 95000, Quota: 100000, Percent: 95, OverLimit: true}}}
-	sw := &fakeSwitcher{}
+	sw := &fakeSwitcher{route: &dns.WorkerRoute{ID: "r1", Pattern: "a.test/*", Script: "worker-a-script"}}
 	s := mkSite(down.URL, down.URL, defaultProbe(), sw, q.query)
 
 	for i := 0; i < 5; i++ {
@@ -435,10 +450,24 @@ func TestAllDownNoSwitch(t *testing.T) {
 		s.mu.Unlock()
 	}
 	if s.currentIndex != 0 {
-		t.Fatalf("A 超限但后继全挂应保持现状（nextAvailable 返回 -1），实际 index=%d", s.currentIndex)
+		t.Fatalf("A 超限但后继全挂应保持现状，实际 index=%d", s.currentIndex)
 	}
-	if sw.patchCalls != 0 {
-		t.Fatalf("不应 PATCH")
+	if sw.putCalls+sw.delCalls != 0 {
+		t.Fatalf("不应执行 route 操作")
+	}
+}
+
+// SyncActual：有 route 指向 worker-b → 对齐到 worker-b
+func TestSyncActualRouteToWorker(t *testing.T) {
+	up := upSrv()
+	defer up.Close()
+	sw := &fakeSwitcher{route: &dns.WorkerRoute{ID: "r1", Pattern: "a.test/*", Script: "worker-b-script"}}
+	s := mkSite(up.URL, up.URL, defaultProbe(), sw, (&fakeQuota{}).query)
+	if err := s.SyncActual(); err != nil {
+		t.Fatal(err)
+	}
+	if s.currentIndex != 1 {
+		t.Fatalf("route 指向 worker-b 应对齐到 index 1，实际 %d", s.currentIndex)
 	}
 }
 
@@ -446,7 +475,7 @@ func TestAllDownNoSwitch(t *testing.T) {
 func TestSnapshot(t *testing.T) {
 	up := upSrv()
 	defer up.Close()
-	sw := &fakeSwitcher{record: dns.Record{Type: "CNAME", Content: "a.workers.dev"}}
+	sw := &fakeSwitcher{route: &dns.WorkerRoute{ID: "r1", Pattern: "a.test/*", Script: "worker-a-script"}}
 	s := mkSite(up.URL, up.URL, defaultProbe(), sw, (&fakeQuota{}).query)
 	s.mu.Lock()
 	s.events = append(s.events, SwitchEvent{Time: "12:00:00", From: "worker-a", To: "server", Reason: "quota", Detail: "测试"})
@@ -459,8 +488,11 @@ func TestSnapshot(t *testing.T) {
 	if snap.Current != "worker-a" || snap.CurrentIndex != 0 {
 		t.Fatalf("Snapshot 当前指向异常: %+v", snap)
 	}
-	if snap.Targets[2].Name != "server" || snap.Targets[2].QuotaAccount != "" {
-		t.Fatalf("兜底目标应为无限额度: %+v", snap.Targets[2])
+	if snap.RoutePattern != "a.test/*" {
+		t.Fatalf("Snapshot route_pattern 异常: %+v", snap.RoutePattern)
+	}
+	if snap.Targets[2].Name != "server" || snap.Targets[2].Script != "" {
+		t.Fatalf("兜底目标应无 script: %+v", snap.Targets[2])
 	}
 }
 

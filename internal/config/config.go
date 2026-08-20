@@ -35,22 +35,29 @@ type SiteConfig struct {
 	// 数据面用户直连 DNS 指向的目标；本程序只做探测 + 配额监控 + 切换 DNS 记录。
 	Targets []TargetConfig `yaml:"targets"` // 目标队列（有序）
 	Probe   ProbeConfig    `yaml:"probe"`   // 探测参数（缺省用全局默认）
+	// RoutePattern 站点级 CF Worker Route pattern（如 parse.shenzjd.com/*）。
+	// 切换 = 操作这条 route：指向 worker script → 流量走 worker；删除 route → 回源 DNS A 记录（服务器兜底）。
+	RoutePattern string `yaml:"route_pattern"`
 
 	// 兼容旧配置：primary/backup 在 Normalize 时转换为 targets[0]/[1]（新配置请直接用 targets）
 	Primary TargetConfig `yaml:"primary"`
 	Backup  TargetConfig `yaml:"backup"`
 }
 
-// TargetConfig DNS 配额轮换队列中的一个目标：一条 DNS 记录可在多个目标间切换指向。
+// TargetConfig DNS 配额轮换队列中的一个目标。
 // QuotaAccount 非空时该目标受 CF 免费配额约束（引 cf_accounts 账号），配额超限自动切下一个；
 // 为空 = 无限额度兜底（如服务器 IP），只受健康约束。
+//
+// 切换语义（route 方案）：Script 非空的目标 = CF Worker（切换时把站点 RoutePattern 的 route 指向该 script，
+// 流量被 route 接管）；Script 为空的目标 = 服务器兜底（切换时删除 route，流量回源 DNS A 记录 → 服务器）。
 type TargetConfig struct {
 	Name         string `yaml:"name"`          // 目标名称（面板展示）
-	RecordType   string `yaml:"record_type"`   // 切换后记录类型：worker 通常 CNAME、服务器通常 A
-	DNSContent   string `yaml:"dns_content"`   // 切换后记录的 content：CNAME → 目标域名；A → IP
+	RecordType   string `yaml:"record_type"`   // 展示用：worker 通常 CNAME、服务器通常 A（不再 PATCH）
+	DNSContent   string `yaml:"dns_content"`   // 展示用：DNS 记录内容（route 方案下固定服务器 A 记录）
 	URL          string `yaml:"url"`           // 探测用 URL（服务器目标通常本地 http://127.0.0.1:<port>）
 	Health       string `yaml:"health"`        // 探测路径（默认用全局 health_path）
 	QuotaAccount string `yaml:"quota_account"` // 配额信号：引 cf_accounts 账号名；空=无限额度兜底
+	Script       string `yaml:"script"`        // CF Worker 名（非空 = worker 目标；空 = 服务器兜底）
 }
 
 // ProbeConfig 探测与切换防抖参数

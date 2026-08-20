@@ -210,3 +210,68 @@ func urlQuery(s string) string {
 	// 简单 URL 编码（域名只含合法字符，直接替换即可）
 	return strings.ReplaceAll(s, "%", "%25")
 }
+
+// WorkerRoute 一条 Workers Route（可编程切换 worker ⇄ 服务器兜底的关键）
+type WorkerRoute struct {
+	ID      string `json:"id"`
+	Pattern string `json:"pattern"`
+	Script  string `json:"script"`
+}
+
+// ListRoutes 列出 zone 下全部 Workers Routes
+func (c *Client) ListRoutes(zoneID string) ([]WorkerRoute, error) {
+	raw, err := c.do(http.MethodGet, "/zones/"+zoneID+"/workers/routes", nil)
+	if err != nil {
+		return nil, err
+	}
+	var routes []WorkerRoute
+	if err := json.Unmarshal(raw, &routes); err != nil {
+		return nil, err
+	}
+	return routes, nil
+}
+
+// findRoute 按 pattern 精确匹配现有 route
+func (c *Client) findRoute(zoneID, pattern string) (*WorkerRoute, error) {
+	routes, err := c.ListRoutes(zoneID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range routes {
+		if routes[i].Pattern == pattern {
+			return &routes[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// PutRoute 确保 pattern 指向 script（不存在则创建，存在则更新目标 worker）
+func (c *Client) PutRoute(zoneID, pattern, script string) error {
+	cur, err := c.findRoute(zoneID, pattern)
+	if err != nil {
+		return err
+	}
+	body := map[string]string{"pattern": pattern, "script": script}
+	if cur != nil {
+		if cur.Script == script {
+			return nil // 已指向目标，幂等
+		}
+		_, err = c.do(http.MethodPut, "/zones/"+zoneID+"/workers/routes/"+cur.ID, body)
+		return err
+	}
+	_, err = c.do(http.MethodPost, "/zones/"+zoneID+"/workers/routes", body)
+	return err
+}
+
+// DeleteRoute 删除匹配 pattern 的 route（存在则删，不存在幂等）
+func (c *Client) DeleteRoute(zoneID, pattern string) error {
+	cur, err := c.findRoute(zoneID, pattern)
+	if err != nil {
+		return err
+	}
+	if cur == nil {
+		return nil
+	}
+	_, err = c.do(http.MethodDelete, "/zones/"+zoneID+"/workers/routes/"+cur.ID, nil)
+	return err
+}
