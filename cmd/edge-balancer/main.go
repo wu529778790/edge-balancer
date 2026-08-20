@@ -28,7 +28,10 @@ func main() {
 	defer cancel()
 
 	// 数据库模式优先：配置了 EDGE_DB_URL / EDGE_DB_TOKEN 时从 Turso 读取配置并支持热加载
-	st, _ := store.OpenStore()
+	st, dbErr := store.OpenStore()
+	if dbErr != nil {
+		log.Printf("数据库模式不可用（%v），回退本地文件模式", dbErr)
+	}
 	var cfg *config.Config
 	var err error
 	if st != nil {

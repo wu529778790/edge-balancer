@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	_ "github.com/tursodatabase/libsql-client-go/libsql"
+	_ "modernc.org/sqlite" // file: 本地库支持（本地调试 DB 模式用，不影响生产 Turso）
 
 	"github.com/wu529778790/edge-balancer/internal/config"
 )
