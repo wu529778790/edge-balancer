@@ -98,6 +98,20 @@ func (s *Server) reload() error {
 	}
 	s.cfg = cfg
 
+	// 告警：存在直连站点（failover）但 DNS zone 为空 → failover 静默失效（总览页全 0）
+	{
+		hasFO := false
+		for _, sc := range cfg.Sites {
+			if len(sc.Targets) > 0 {
+				hasFO = true
+				break
+			}
+		}
+		if hasFO && cfg.DNS.Zone == "" {
+			log.Printf("警告: 存在直连站点（failover）但 DNS zone 为空，配额轮换未启用！请在面板 配置管理 → DNS 故障切换 填写 zone")
+		}
+	}
+
 	// failover（DNS 配额轮换）：配置指纹变化才重建（支持 DB 模式热加载，且不频繁调 CF API）
 	if s.dnsClient == nil && cfg.DNS.Zone != "" {
 		// server.New 时 dns_zone 为空被跳过；这里补救：reload 时若配置有了就构造 DNS 客户端

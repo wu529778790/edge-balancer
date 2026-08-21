@@ -265,6 +265,14 @@ func (h *Handler) serveConfigAPI(w http.ResponseWriter, r *http.Request, cfg *co
 				http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
 				return
 			}
+			// 防呆：dns_zone 空值不覆盖已有值。
+			// 否则某次保存全局设置误提交空 zone → store.LoadConfig 拿到空 cfg.DNS.Zone
+			// → dnsClient 不创建 → failover 静默失效（总览页全 0，API 501）。
+			if dz, ok := m["dns_zone"]; ok && dz == "" {
+				if old, err := h.store.GetSettings(); err == nil && old["dns_zone"] != "" {
+					m["dns_zone"] = old["dns_zone"]
+				}
+			}
 			for k, v := range m {
 				if err := h.store.SetSetting(k, v); err != nil {
 					http.Error(w, err.Error(), http.StatusInternalServerError)

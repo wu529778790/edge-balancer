@@ -585,13 +585,16 @@ function loadSettings(){
   });
 }
 function saveSettings(){
+  var dz=document.getElementById('set-dns-zone').value.trim();
+  // 防呆：存在直连站点（failover）时 DNS zone 必填，否则 failover 静默失效（总览页全 0）
+  if(!dz && gFO && gFO.length){alert('存在直连站点时 DNS zone 不能为空（否则配额轮换不生效）');return}
   var body={};
   body['admin_token']=document.getElementById('set-admin-token').value;
   body['health_interval']=document.getElementById('set-hi').value;
   body['health_timeout']=document.getElementById('set-ht').value;
   body['health_path']=document.getElementById('set-hp').value;
   body['upstream_timeout']=document.getElementById('set-ut').value;
-  body['dns_zone']=document.getElementById('set-dns-zone').value;
+  body['dns_zone']=dz;
   body['dns_ttl']=document.getElementById('set-dns-ttl').value;
   body['dns_dry_run']=document.getElementById('set-dns-dry').checked?'1':'0';
   api('/admin/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(){
