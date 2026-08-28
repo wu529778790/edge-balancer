@@ -65,13 +65,30 @@ func main() {
 			defer cfgTicker.Stop()
 			quotaTicker := time.NewTicker(1 * time.Hour)
 			defer quotaTicker.Stop()
+			// Turso 云端偶发 502/400 瞬时抖动（秒级自愈）：失败后隔 2s 立即重试一次，
+			// 重试成功则完全不记日志；连续失败只在首次和每 20 次（约 100s）记一条，
+			// 恢复时记一条汇总，避免长故障期间每 5s 刷一行重复错误
+			failStreak := 0
 			for {
 				select {
 				case <-ctx.Done():
 					return
 				case <-cfgTicker.C:
-					if err := srv.Reload(); err != nil {
-						log.Printf("配置重载失败: %v", err)
+					err := srv.Reload()
+					if err != nil {
+						time.Sleep(2 * time.Second)
+						err = srv.Reload()
+					}
+					if err != nil {
+						failStreak++
+						if failStreak == 1 || failStreak%20 == 0 {
+							log.Printf("配置重载失败（连续 %d 次）: %v", failStreak, err)
+						}
+					} else {
+						if failStreak > 0 {
+							log.Printf("配置重载已恢复，此前连续失败 %d 次", failStreak)
+						}
+						failStreak = 0
 					}
 				case <-quotaTicker.C:
 					if _, err := srv.CheckCFQuotas(); err != nil {
